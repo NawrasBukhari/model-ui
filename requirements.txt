@@ -1,0 +1,5 @@
+opencv-python~=4.11.0.86
+torch~=2.5.1+cu121
+ultralytics~=8.3.126
+PyQt6~=6.9.0
+playsound
