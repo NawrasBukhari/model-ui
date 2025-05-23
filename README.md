@@ -1,6 +1,8 @@
 # 🔥 Fire Detection App - Multi-Source Camera Support
 
 A comprehensive fire and smoke detection application using YOLO models with support for multiple camera sources including local cameras, WiFi cameras, mobile IP cameras, and Android ScreenStream.
+![image](https://github.com/user-attachments/assets/ae3b8b4d-9efc-4333-a9ed-862e1515a6a9)
+
 
 ## ✨ Features
 
