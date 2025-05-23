@@ -20,7 +20,7 @@ class DetectionTracker:
         self.consecutive_detections: int = 0
         self.first_detection_time: Optional[datetime] = None
 
-    def add_detection(self, frame_num: int, class_name: str, confidence: float) -> None:
+    def add_detection(self, frame_num: int, class_name: str) -> None:
         """Record a detection"""
         self.detection_frames += 1
         self.last_detection_frame = frame_num
@@ -50,6 +50,7 @@ class DetectionTracker:
 
         return "\n".join(summary)
 
+
 def get_available_device() -> Tuple[str, str]:
     """
     Determine the best available computing device (GPU or CPU)
@@ -65,6 +66,7 @@ def get_available_device() -> Tuple[str, str]:
         return "mps", "Apple Silicon GPU (MPS)"
     else:
         return "cpu", "CPU (No GPU available)"
+
 
 def is_iphone_video(input_path: str) -> bool:
     """
@@ -94,6 +96,7 @@ def is_iphone_video(input_path: str) -> bool:
     except Exception as e:
         print(f"Error checking if video is iPhone: {e}")
         return False
+
 
 def process_video(
         input_path: str,
@@ -167,7 +170,6 @@ def process_video(
         duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / input_fps
         total_frames = int(duration * input_fps)
         if total_frames <= 0:
-
             total_frames = 9999
             print("Warning: Could not determine frame count, will process until end of video")
 
@@ -314,7 +316,6 @@ def process_video(
                 if process_this_frame:
 
                     if is_iphone:
-
                         alpha = 1.1
                         beta = 5
 
@@ -384,6 +385,7 @@ def process_video(
 
     return True
 
+
 def process_frames(
         model: Any,
         frames: List[Any],
@@ -438,7 +440,7 @@ def process_frames(
                     detection_in_frame = True
                     any_detection = True
 
-                    tracker.add_detection(frame_idx, label, conf)
+                    tracker.add_detection(frame_idx, label)
 
                     cv2.putText(annotated_frame, f"{label.upper()} - {conf:.2f}",
                                 (int(box.xyxy[0][0]), int(box.xyxy[0][1]) - 10),
@@ -448,12 +450,32 @@ def process_frames(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         if detection_in_frame:
-            cv2.putText(annotated_frame, "FIRE/SMOKE DETECTED", (10, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-
             if save_frames and frames_dir is not None:
+                # Save annotated frame
                 frame_path = os.path.join(frames_dir, f"detection_frame_{frame_idx:06d}.jpg")
                 cv2.imwrite(frame_path, annotated_frame)
+
+                # Save YOLO label file
+                label_path = frame_path.replace('.jpg', '.txt')
+                with open(label_path, 'w') as f:
+                    for box in r.boxes:
+                        cls_id = int(box.cls.item())
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+
+                        img_h, img_w = annotated_frame.shape[:2]
+                        x_center = ((x1 + x2) / 2) / img_w
+                        y_center = ((y1 + y2) / 2) / img_h
+                        width = (x2 - x1) / img_w
+                        height = (y2 - y1) / img_h
+
+                        f.write(f"{cls_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
+
+            # Optionally save class names once
+            if hasattr(model, 'names') and 'classes_written' not in globals():
+                with open(os.path.join(frames_dir, 'classes.txt'), 'w') as cf:
+                    for idx, name in model.names.items():
+                        cf.write(f"{idx}: {name}\n")
+                globals()['classes_written'] = True
 
         height, width = annotated_frame.shape[:2]
         progress_text = f"Frame: {frame_idx}/{tracker.total_frames}"
@@ -464,13 +486,13 @@ def process_frames(
 
     return any_detection
 
-def main():
 
+def main():
     parser = argparse.ArgumentParser(description='Fire/Smoke Detection Video Processor')
     parser.add_argument('input', help='Input video file path')
     parser.add_argument('--output', '-o', help='Output video file path (default: processed_<input>.avi)')
     parser.add_argument('--model', '-m', required=True, help='YOLO model file path (.pt)')
-    parser.add_argument('--conf', '-c', type=float, default=0.20,
+    parser.add_argument('--conf', '-c', type=float, default=0.10,
                         help='Detection confidence threshold (0-1, default: 0.20)')
     parser.add_argument('--batch', '-b', type=int, default=4, help='Batch size for processing (default: 4)')
     parser.add_argument('--save-frames', '-s', action='store_true', help='Save individual frames with detections')
@@ -505,6 +527,7 @@ def main():
     )
 
     return 0 if success else 1
+
 
 if __name__ == "__main__":
     main()
