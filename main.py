@@ -3,11 +3,13 @@ import socket
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from enum import Enum, auto
 from typing import Optional, List, Dict, Any
 
 import cv2
+import numpy as np
 import torch
 from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
@@ -15,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QComboBox, QCheckBox, QFileDialog, QSlider, QSizePolicy, QLineEdit,
     QGroupBox, QFormLayout, QRadioButton, QButtonGroup, QMessageBox,
-    QProgressDialog
+    QProgressDialog, QInputDialog
 )
 from ultralytics import YOLO
 
@@ -24,6 +26,7 @@ class CameraSource(Enum):
     LOCAL = auto()
     WIFI = auto()
     MOBILE = auto()
+    SCREENSTREAM = auto()
 
 
 class MobileCameraApp:
@@ -48,16 +51,202 @@ class DetectionState(Enum):
     ERROR = auto()
 
 
+class ScreenStreamReader:
+    """Class to handle ScreenStream MJPEG streams"""
+
+    def __init__(self, base_url):
+        self.base_url = base_url.rstrip('/')
+        self.stream = None
+        self.bytes_buffer = bytes()
+        self.current_frame = None
+        self.is_running = False
+        self.thread = None
+        self.connection_error = None
+        self.client_id = self.generate_client_id()
+        self.pin = None
+
+    @staticmethod
+    def generate_client_id():
+        """Generate a random client ID as used by ScreenStream"""
+        return ''.join(np.random.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"), 16))
+
+    def set_pin(self, pin):
+        """Set PIN code if the stream requires one"""
+        self.pin = pin
+
+    def start(self):
+        if self.is_running:
+            return False
+
+        self.is_running = True
+        self.connection_error = None
+        self.thread = threading.Thread(target=self._stream_thread, daemon=True)
+        self.thread.start()
+        return True
+
+    def stop(self):
+        self.is_running = False
+        if self.stream:
+            try:
+                self.stream.close()
+            except:
+                pass
+        if self.thread:
+            self.thread = None
+
+    def _stream_thread(self):
+        try:
+            stream_url = f"{self.base_url}/stream.mjpeg?clientId={self.client_id}"
+            print(f"Trying stream URL: {stream_url}")
+
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Cache-Control': 'no-cache'
+            }
+
+            req = urllib.request.Request(stream_url, headers=headers)
+            self.stream = urllib.request.urlopen(req, timeout=10)
+
+            content_type = self.stream.info().get('Content-Type', '')
+            print(f"Stream content type: {content_type}")
+
+            # Try alternative endpoints if we get HTML instead of stream
+            if 'text/html' in content_type:
+                print("Received HTML content, trying alternative endpoints...")
+                alternative_endpoints = [
+                    "/stream?clientId=",
+                    "/shot.jpg?clientId=",
+                    "?clientId="
+                ]
+
+                for endpoint in alternative_endpoints:
+                    try:
+                        alt_url = f"{self.base_url}{endpoint}{self.client_id}"
+                        print(f"Trying alternative URL: {alt_url}")
+
+                        alt_req = urllib.request.Request(alt_url, headers=headers)
+                        self.stream.close()
+                        self.stream = urllib.request.urlopen(alt_req, timeout=5)
+                        content_type = self.stream.info().get('Content-Type', '')
+                        print(f"Alternative stream content type: {content_type}")
+
+                        if 'image/jpeg' in content_type or 'multipart' in content_type:
+                            break
+                    except Exception as e:
+                        print(f"Failed to connect to alternative endpoint {endpoint}: {e}")
+
+            self.bytes_buffer = bytes()
+
+            while self.is_running:
+                try:
+                    chunk = self.stream.read(4096)
+                    if not chunk:
+                        print("End of stream reached")
+                        break
+
+                    self.bytes_buffer += chunk
+
+                    # Find JPEG markers
+                    a = self.bytes_buffer.find(b'\xff\xd8')  # JPEG start
+                    b = self.bytes_buffer.find(b'\xff\xd9')  # JPEG end
+
+                    if a != -1 and b != -1 and a < b:
+                        jpg_bytes = self.bytes_buffer[a:b + 2]
+                        self.bytes_buffer = self.bytes_buffer[b + 2:]
+
+                        img = cv2.imdecode(np.frombuffer(jpg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if img is not None:
+                            self.current_frame = img
+                            print(f"Received frame: {img.shape}")
+
+                except Exception as e:
+                    print(f"Error reading stream: {e}")
+                    time.sleep(0.1)
+
+        except Exception as e:
+            self.connection_error = str(e)
+            print(f"Failed to connect to stream: {e}")
+
+        self.is_running = False
+
+    def get_frame(self):
+        return self.current_frame
+
+    def get_error(self):
+        return self.connection_error
+
+
+class StaticJpegReader:
+    """Class to handle single JPEG image updates for ScreenStream"""
+
+    def __init__(self, base_url, client_id):
+        self.base_url = base_url
+        self.client_id = client_id
+        self.is_running = False
+        self.thread = None
+        self.current_frame = None
+        self.connection_error = None
+
+    def start(self):
+        if self.is_running:
+            return False
+
+        self.is_running = True
+        self.thread = threading.Thread(target=self._image_thread, daemon=True)
+        self.thread.start()
+        return True
+
+    def stop(self):
+        self.is_running = False
+        if self.thread:
+            self.thread = None
+
+    def _image_thread(self):
+        """Thread to repeatedly fetch static JPEG images"""
+        while self.is_running:
+            try:
+                image_url = f"{self.base_url}/shot.jpg?clientId={self.client_id}&t={time.time()}"
+
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                    'Cache-Control': 'no-cache, no-store, must-revalidate'
+                }
+
+                req = urllib.request.Request(image_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    img_array = np.frombuffer(response.read(), dtype=np.uint8)
+                    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+                    if img is not None:
+                        self.current_frame = img
+                        print(f"Received JPEG frame: {img.shape}")
+
+            except Exception as e:
+                self.connection_error = str(e)
+                print(f"Error fetching static image: {e}")
+
+            time.sleep(0.1)
+
+    def get_frame(self):
+        return self.current_frame
+
+    def get_error(self):
+        return self.connection_error
+
+
 class NetworkScanner(QThread):
     """Thread for scanning the local network for devices"""
     update_progress = pyqtSignal(int)
     scan_complete = pyqtSignal(list)
 
-    def __init__(self, ip_range: Optional[List[str]] = None):
+    def __init__(self, ip_range: Optional[List[str]] = None, scan_type: str = "mobile"):
         super().__init__()
         self.ip_range = ip_range or self._get_local_network()
         self.found_devices: List[Dict[str, str]] = []
         self.is_running = True
+        self.scan_type = scan_type
 
     @staticmethod
     def _get_local_network() -> List[str]:
@@ -74,7 +263,14 @@ class NetworkScanner(QThread):
             return [f"192.168.1.{i}" for i in range(1, 255)]
 
     def run(self):
-        """Scan the network for devices with mobile camera app ports open"""
+        """Scan the network for devices"""
+        if self.scan_type == "mobile":
+            self._scan_mobile_cameras()
+        elif self.scan_type == "screenstream":
+            self._scan_screenstream()
+
+    def _scan_mobile_cameras(self):
+        """Scan for mobile camera apps"""
         for i, ip in enumerate(self.ip_range):
             if not self.is_running:
                 break
@@ -88,6 +284,22 @@ class NetworkScanner(QThread):
                     url = f"http://{ip}:{application.port}{application.path}"
                     self.found_devices.append({"name": device_name, "url": url})
                     break
+
+        self.scan_complete.emit(self.found_devices)  # type: ignore
+
+    def _scan_screenstream(self):
+        """Scan for ScreenStream devices"""
+        for i, ip in enumerate(self.ip_range):
+            if not self.is_running:
+                break
+
+            progress = int((i / len(self.ip_range)) * 100)
+            self.update_progress.emit(progress)  # type: ignore
+
+            if self._check_port(ip, 8080):
+                device_name = f"ScreenStream Device ({ip})"
+                url = f"http://{ip}:8080"
+                self.found_devices.append({"name": device_name, "url": url})
 
         self.scan_complete.emit(self.found_devices)  # type: ignore
 
@@ -116,21 +328,70 @@ class VideoHandler:
         self.current_frame = None
         self.frame_lock = threading.Lock()
         self.record_enabled = False
+        self.stream_reader = None
 
     def open_camera(self, source: Any) -> bool:
         """Open a video capture source"""
         self.release()
-        self.capture = cv2.VideoCapture(source)
-        return self.capture.isOpened()
+        if isinstance(source, str) and ("screenstream" in source.lower() or ":8080" in source):
+            # Handle ScreenStream separately
+            return False  # Will be handled by open_screenstream
+        else:
+            self.capture = cv2.VideoCapture(source)
+            return self.capture.isOpened()
+
+    def open_screenstream(self, url: str, pin: Optional[str] = None) -> bool:
+        """Open a ScreenStream source"""
+        self.release()
+
+        # Try MJPEG stream first
+        self.stream_reader = ScreenStreamReader(url)
+        if pin:
+            self.stream_reader.set_pin(pin)
+
+        self.stream_reader.start()
+        time.sleep(2)  # Wait for connection
+
+        # Check if we got frames
+        got_frame = self.stream_reader.get_frame() is not None
+        error = self.stream_reader.get_error()
+
+        # If MJPEG failed, try static JPEG
+        if not got_frame or error:
+            print("MJPEG stream failed, trying static JPEG approach")
+            self.stream_reader.stop()
+
+            self.stream_reader = StaticJpegReader(url, ScreenStreamReader.generate_client_id())
+            self.stream_reader.start()
+            time.sleep(2)
+
+            got_frame = self.stream_reader.get_frame() is not None
+
+            if not got_frame:
+                self.stream_reader.stop()
+                self.stream_reader = None
+                return False
+
+        return True
 
     def start_recording(self, filename: str) -> bool:
         """Start video recording"""
-        if not self.capture or not self.capture.isOpened():
+        if not self.capture and not self.stream_reader:
             return False
 
         fourcc = cv2.VideoWriter_fourcc(*'XVID')  # type: ignore
-        width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if self.capture and self.capture.isOpened():
+            width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        else:
+            # For ScreenStream, we'll get dimensions from the first frame
+            frame = self.get_frame()
+            if frame is not None:
+                height, width = frame.shape[:2]
+            else:
+                width, height = 640, 480  # Default
+
         self.video_writer = cv2.VideoWriter(filename, fourcc, 30.0, (width, height))
         self.record_enabled = True
         return self.video_writer.isOpened()
@@ -145,6 +406,9 @@ class VideoHandler:
         if self.capture:
             self.capture.release()
             self.capture = None
+        if self.stream_reader:
+            self.stream_reader.stop()
+            self.stream_reader = None
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
@@ -162,9 +426,17 @@ class VideoHandler:
 
     def read_frame(self) -> tuple:
         """Read a frame from the capture"""
-        if not self.capture or not self.capture.isOpened():
+        if self.stream_reader:
+            # Handle ScreenStream
+            frame = self.stream_reader.get_frame()
+            if frame is not None:
+                return True, frame
+            else:
+                return False, None
+        elif self.capture and self.capture.isOpened():
+            return self.capture.read()
+        else:
             return False, None
-        return self.capture.read()
 
 
 class DetectionThread(QThread):
@@ -223,7 +495,7 @@ class FireDetectionApp(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YOLO Fire/Smoke Detection")
+        self.setWindowTitle("YOLO Fire/Smoke Detection - Multi-Source")
 
         self.device = self._get_device()
         self.model = None
@@ -233,6 +505,7 @@ class FireDetectionApp(QWidget):
         self.network_scanner = None
         self.progress_dialog = None
         self.mobile_devices = []
+        self.screenstream_devices = []
 
         self.state = DetectionState.IDLE
         self.conf_threshold = 0.1
@@ -241,9 +514,9 @@ class FireDetectionApp(QWidget):
         self.alert_triggered = False
         self.latest_results = None
         self.camera_source = CameraSource.LOCAL
+        self.screenstream_pin = None
 
         self.init_ui()
-        self.update_ui_state()
 
     @staticmethod
     def _get_device() -> str:
@@ -295,6 +568,9 @@ class FireDetectionApp(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)  # type: ignore
 
+        # Initialize UI state after all widgets are created
+        self.update_ui_state()
+
     def _init_camera_source_ui(self):
         """Initialize camera source selection UI"""
         layout = QVBoxLayout()
@@ -302,27 +578,41 @@ class FireDetectionApp(QWidget):
         self.local_camera_radio = QRadioButton("Local Camera")
         self.wifi_camera_radio = QRadioButton("WiFi Camera")
         self.mobile_camera_radio = QRadioButton("Mobile IP Camera")
+        self.screenstream_radio = QRadioButton("ScreenStream (Android)")
         self.local_camera_radio.setChecked(True)
+
+        # Connect each radio button individually for better control
+        self.local_camera_radio.toggled.connect(  # type: ignore
+            lambda checked: self._on_camera_source_changed(self.local_camera_radio) if checked else None)
+        self.wifi_camera_radio.toggled.connect(  # type: ignore
+            lambda checked: self._on_camera_source_changed(self.wifi_camera_radio) if checked else None)
+        self.mobile_camera_radio.toggled.connect(  # type: ignore
+            lambda checked: self._on_camera_source_changed(self.mobile_camera_radio) if checked else None)
+        self.screenstream_radio.toggled.connect(  # type: ignore
+            lambda checked: self._on_camera_source_changed(self.screenstream_radio) if checked else None)
 
         button_group = QButtonGroup()
         button_group.addButton(self.local_camera_radio)
         button_group.addButton(self.wifi_camera_radio)
         button_group.addButton(self.mobile_camera_radio)
-        button_group.buttonClicked.connect(self._on_camera_source_changed)  # type: ignore
+        button_group.addButton(self.screenstream_radio)
 
         layout.addWidget(self.local_camera_radio)
         layout.addWidget(self.wifi_camera_radio)
         layout.addWidget(self.mobile_camera_radio)
+        layout.addWidget(self.screenstream_radio)
         self.camera_source_group.setLayout(layout)
 
     def _init_camera_settings_ui(self):
         """Initialize camera settings UI"""
         layout = QFormLayout()
 
+        # Local Camera Settings
         self.camera_selector = QComboBox()
         self._populate_camera_list()
         layout.addRow("Local Camera:", self.camera_selector)
 
+        # WiFi Camera Settings
         self.wifi_url_input = QLineEdit()
         self.wifi_url_input.setPlaceholderText("rtsp://username:password@ip_address:port/path")
         self.test_connection_button = QPushButton("Test Connection")
@@ -332,6 +622,7 @@ class FireDetectionApp(QWidget):
         wifi_layout.addWidget(self.test_connection_button)
         layout.addRow("WiFi Camera URL:", wifi_layout)
 
+        # Mobile Camera Settings
         self.mobile_camera_selector = QComboBox()
         self.mobile_camera_selector.setPlaceholderText("Select a mobile camera...")
         self.mobile_scan_button = QPushButton("Scan Network")
@@ -344,6 +635,27 @@ class FireDetectionApp(QWidget):
         self.mobile_manual_ip = QLineEdit()
         self.mobile_manual_ip.setPlaceholderText("Or enter IP address manually (e.g. 192.168.1.100)")
         layout.addRow("Manual IP:", self.mobile_manual_ip)
+
+        # ScreenStream Settings
+        self.screenstream_url_input = QLineEdit()
+        self.screenstream_url_input.setPlaceholderText("http://192.168.1.100:8080")
+        self.screenstream_pin_button = QPushButton("Set PIN")
+        self.screenstream_pin_button.clicked.connect(self.set_screenstream_pin)  # type: ignore
+        self.screenstream_scan_button = QPushButton("Auto-Detect")
+        self.screenstream_scan_button.clicked.connect(self.scan_for_screenstream)  # type: ignore
+        self.screenstream_test_button = QPushButton("Test")
+        self.screenstream_test_button.clicked.connect(self.test_screenstream_connection)  # type: ignore
+
+        screenstream_layout = QHBoxLayout()
+        screenstream_layout.addWidget(self.screenstream_url_input)
+        screenstream_layout.addWidget(self.screenstream_pin_button)
+        screenstream_layout.addWidget(self.screenstream_scan_button)
+        screenstream_layout.addWidget(self.screenstream_test_button)
+        layout.addRow("ScreenStream URL:", screenstream_layout)
+
+        self.screenstream_selector = QComboBox()
+        self.screenstream_selector.setPlaceholderText("Select detected ScreenStream...")
+        layout.addRow("Detected Devices:", self.screenstream_selector)
 
         self.camera_settings_box.setLayout(layout)
 
@@ -380,23 +692,38 @@ class FireDetectionApp(QWidget):
 
     def _on_camera_source_changed(self, button):
         """Handle camera source selection change"""
+        print(f"Camera source changed to: {button.text()}")  # Debug print
+
         if button == self.local_camera_radio:
             self.camera_source = CameraSource.LOCAL
         elif button == self.wifi_camera_radio:
             self.camera_source = CameraSource.WIFI
-        else:
+        elif button == self.mobile_camera_radio:
             self.camera_source = CameraSource.MOBILE
+        elif button == self.screenstream_radio:
+            self.camera_source = CameraSource.SCREENSTREAM
+
+        # Force UI update
         self.update_ui_state()
+        print(f"New camera source: {self.camera_source}")  # Debug print
 
     def update_ui_state(self):
         """Update UI elements based on current state"""
-
+        # Enable/disable controls based on selected camera source
         self.camera_selector.setEnabled(self.camera_source == CameraSource.LOCAL)
+
         self.wifi_url_input.setEnabled(self.camera_source == CameraSource.WIFI)
         self.test_connection_button.setEnabled(self.camera_source == CameraSource.WIFI)
+
         self.mobile_camera_selector.setEnabled(self.camera_source == CameraSource.MOBILE)
         self.mobile_scan_button.setEnabled(self.camera_source == CameraSource.MOBILE)
         self.mobile_manual_ip.setEnabled(self.camera_source == CameraSource.MOBILE)
+
+        self.screenstream_url_input.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
+        self.screenstream_pin_button.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
+        self.screenstream_scan_button.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
+        self.screenstream_test_button.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
+        self.screenstream_selector.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
 
         self.start_button.setText("Start" if self.state != DetectionState.RUNNING else "Stop")
 
@@ -408,6 +735,133 @@ class FireDetectionApp(QWidget):
             if cap.isOpened():
                 self.camera_selector.addItem(f"Camera {i}")
             cap.release()
+
+    def set_screenstream_pin(self):
+        """Set a PIN code for accessing protected ScreenStream"""
+        pin, ok = QInputDialog.getText(
+            self, "ScreenStream PIN", "Enter PIN code:",
+            QLineEdit.EchoMode.Password, ""
+        )
+        if ok and pin:
+            self.screenstream_pin = pin
+            self.status_label.setText("PIN set successfully")
+
+    def scan_for_screenstream(self):
+        """Scan the local network for ScreenStream devices"""
+        if self.network_scanner and self.network_scanner.isRunning():
+            return
+
+        self.progress_dialog = QProgressDialog(
+            "Scanning network for ScreenStream devices...",
+            "Cancel", 0, 100, self
+        )
+        self.progress_dialog.setWindowTitle("ScreenStream Scan")
+        self.progress_dialog.setModal(True)
+
+        self.network_scanner = NetworkScanner(scan_type="screenstream")
+        self.network_scanner.update_progress.connect(self.progress_dialog.setValue)  # type: ignore
+        self.network_scanner.scan_complete.connect(self._on_screenstream_scan_complete)  # type: ignore
+        self.progress_dialog.canceled.connect(self.network_scanner.stop)  # type: ignore
+
+        self.network_scanner.start()
+        self.progress_dialog.show()
+        self.status_label.setText("🔍 Scanning network for ScreenStream devices...")
+        self.state = DetectionState.SCANNING
+
+    def _on_screenstream_scan_complete(self, devices):
+        """Handle ScreenStream scan completion"""
+        self.progress_dialog.hide()
+        self.screenstream_devices = devices
+        self.state = DetectionState.IDLE
+
+        self.screenstream_selector.clear()
+        if not devices:
+            self.status_label.setText("⚠️ No ScreenStream devices found on the network")
+            return
+
+        for device in devices:
+            self.screenstream_selector.addItem(device["name"], device["url"])
+
+        self.status_label.setText(f"✅ Found {len(devices)} ScreenStream device(s) on the network")
+
+    def test_screenstream_connection(self):
+        """Test the connection to a ScreenStream device"""
+        url = self.screenstream_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Input Error", "Please enter a valid ScreenStream URL")
+            return
+
+        self.status_label.setText("Testing ScreenStream connection...")
+        QApplication.processEvents()
+
+        # Try both methods: MJPEG stream and static JPEG
+        try_methods = [
+            ("MJPEG Stream", ScreenStreamReader),
+            ("Static JPEG", lambda url: StaticJpegReader(url, ScreenStreamReader.generate_client_id()))
+        ]
+
+        success = False
+        frame = None
+        working_method = ""
+
+        for method_name, reader_class in try_methods:
+            self.status_label.setText(f"Testing with {method_name}...")
+            QApplication.processEvents()
+
+            reader = reader_class(url)
+            if self.screenstream_pin and hasattr(reader, 'set_pin'):
+                reader.set_pin(self.screenstream_pin)
+
+            reader.start()
+
+            # Wait for up to 5 seconds to get a frame
+            start_time = time.time()
+            while time.time() - start_time < 5:
+                test_frame = reader.get_frame()
+                if test_frame is not None:
+                    frame = test_frame
+                    success = True
+                    working_method = method_name
+                    break
+
+                error = reader.get_error()
+                if error:
+                    print(f"Connection error with {method_name}: {error}")
+                    break
+
+                time.sleep(0.1)
+                QApplication.processEvents()
+
+            reader.stop()
+
+            if success:
+                break
+
+        if success:
+            # Display test frame
+            height, width, channels = frame.shape
+            bytes_per_line = channels * width
+            img = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+            pix = QPixmap.fromImage(img).scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                                Qt.TransformationMode.SmoothTransformation)
+            self.video_label.setPixmap(pix)
+
+            self.status_label.setText(f"✅ ScreenStream connected successfully using {working_method}!")
+            QMessageBox.information(self, "Connection Successful",
+                                    f"Successfully connected to the ScreenStream using {working_method}.")
+        else:
+            self.status_label.setText("❌ Failed to connect to ScreenStream")
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Connection Failed")
+            msg.setText("Could not connect to the ScreenStream.")
+            msg.setInformativeText("Please verify that:\n"
+                                   "1. The ScreenStream app is running on your Android device\n"
+                                   "2. Your PC and Android device are on the same network\n"
+                                   "3. The correct IP address and port are used\n"
+                                   "4. No firewall is blocking the connection\n"
+                                   "5. If the stream requires a PIN, use the 'Set PIN' button")
+            msg.exec()
 
     def update_threshold(self):
         """Update the confidence threshold from slider value"""
@@ -456,6 +910,9 @@ class FireDetectionApp(QWidget):
             self.status_label.setText("⚠️ Please load a model first.")
             return
 
+        success = False
+        source_desc = ""
+
         if self.camera_source == CameraSource.LOCAL:
             if not self.camera_selector.currentText():
                 self.status_label.setText("⚠️ No local camera available")
@@ -463,6 +920,7 @@ class FireDetectionApp(QWidget):
             cam_index = int(self.camera_selector.currentText().split()[-1])
             source_desc = f"Camera {cam_index}"
             success = self.video_handler.open_camera(cam_index)
+
         elif self.camera_source == CameraSource.WIFI:
             url = self.wifi_url_input.text().strip()
             if not url:
@@ -470,13 +928,22 @@ class FireDetectionApp(QWidget):
                 return
             source_desc = f"WiFi camera at {url}"
             success = self.video_handler.open_camera(url)
-        else:
+
+        elif self.camera_source == CameraSource.MOBILE:
             url = self._get_mobile_camera_url()
             if not url:
                 self.status_label.setText("⚠️ Please select a mobile camera or enter an IP address")
                 return
             source_desc = f"Mobile camera at {url}"
             success = self.video_handler.open_camera(url)
+
+        elif self.camera_source == CameraSource.SCREENSTREAM:
+            url = self._get_screenstream_url()
+            if not url:
+                self.status_label.setText("⚠️ Please enter a ScreenStream URL or select a detected device")
+                return
+            source_desc = f"ScreenStream at {url}"
+            success = self.video_handler.open_screenstream(url, self.screenstream_pin)
 
         if not success:
             self.status_label.setText(f"⚠️ Failed to open {source_desc}")
@@ -527,9 +994,21 @@ class FireDetectionApp(QWidget):
         ret, frame = self.video_handler.read_frame()
         if not ret:
             if self.state == DetectionState.RUNNING:
-                self.status_label.setText("⚠️ Camera disconnected")
-                self.stop_detection()
+                # Check if it's a ScreenStream that might just be waiting for frames
+                if self.camera_source == CameraSource.SCREENSTREAM:
+                    no_frame_count = getattr(self, 'no_frame_count', 0) + 1
+                    self.no_frame_count = no_frame_count
+
+                    if no_frame_count % 30 == 0:  # About every second at 30fps
+                        self.status_label.setText(f"⌛ Waiting for ScreenStream frames... ({no_frame_count // 30}s)")
+                    return
+                else:
+                    self.status_label.setText("⚠️ Camera disconnected")
+                    self.stop_detection()
             return
+
+        # Reset no frame counter when we get a frame
+        self.no_frame_count = 0
 
         if self.camera_source == CameraSource.LOCAL:
             frame = cv2.flip(frame, 1)
@@ -546,7 +1025,6 @@ class FireDetectionApp(QWidget):
 
     def _annotate_frame(self, frame):
         """Annotate the frame with detection results and timestamp"""
-
         if self.latest_results:
             frame = self.latest_results[0].plot()
 
@@ -573,24 +1051,37 @@ class FireDetectionApp(QWidget):
         self.video_label.setPixmap(pix)
 
     def _play_alert_sound(self):
-        """Play alert sound using playsound package (works on all platforms)"""
+        """Play alert sound"""
         if (self.alert_triggered and
                 (time.time() - self.last_alert_time > self.alert_interval)):
             try:
+                # Try to use playsound for cross-platform compatibility
                 from playsound import playsound
-
                 sound_file = os.path.join(os.path.dirname(__file__), "alert.wav")
-
-                threading.Thread(
-                    target=playsound,
-                    args=(sound_file, True),
-                    daemon=True
-                ).start()
-
+                if os.path.exists(sound_file):
+                    threading.Thread(
+                        target=playsound,
+                        args=(sound_file, True),
+                        daemon=True
+                    ).start()
+                else:
+                    # Fallback to system beep
+                    print("\a")
                 self.last_alert_time = time.time()
+            except ImportError:
+                # If playsound is not available, try winsound on Windows
+                try:
+                    import winsound
+                    threading.Thread(target=winsound.Beep, args=(1000, 500), daemon=True).start()
+                    self.last_alert_time = time.time()
+                except ImportError:
+                    # Final fallback to system beep
+                    print("\a")
+                    self.last_alert_time = time.time()
             except Exception as e:
                 print(f"Error playing alert sound: {e}")
                 print("\a")
+                self.last_alert_time = time.time()
 
     def test_connection(self):
         """Test the connection to a WiFi camera"""
@@ -632,9 +1123,9 @@ class FireDetectionApp(QWidget):
         self.progress_dialog.setWindowTitle("Network Scan")
         self.progress_dialog.setModal(True)
 
-        self.network_scanner = NetworkScanner()
+        self.network_scanner = NetworkScanner(scan_type="mobile")
         self.network_scanner.update_progress.connect(self.progress_dialog.setValue)  # type: ignore
-        self.network_scanner.scan_complete.connect(self._on_scan_complete)  # type: ignore
+        self.network_scanner.scan_complete.connect(self._on_mobile_scan_complete)  # type: ignore
         self.progress_dialog.canceled.connect(self.network_scanner.stop)  # type: ignore
 
         self.network_scanner.start()
@@ -642,8 +1133,8 @@ class FireDetectionApp(QWidget):
         self.status_label.setText("🔍 Scanning network for mobile cameras...")
         self.state = DetectionState.SCANNING
 
-    def _on_scan_complete(self, devices):
-        """Handle network scan completion"""
+    def _on_mobile_scan_complete(self, devices):
+        """Handle mobile camera scan completion"""
         self.progress_dialog.hide()
         self.mobile_devices = devices
         self.state = DetectionState.IDLE
@@ -660,7 +1151,6 @@ class FireDetectionApp(QWidget):
 
     def _get_mobile_camera_url(self) -> Optional[str]:
         """Get the URL for the selected mobile camera"""
-
         if self.mobile_camera_selector.currentIndex() >= 0:
             return self.mobile_camera_selector.currentData()
 
@@ -679,6 +1169,14 @@ class FireDetectionApp(QWidget):
             return f"http://{manual_ip}:4747/video"
 
         return None
+
+    def _get_screenstream_url(self) -> Optional[str]:
+        """Get the URL for the ScreenStream"""
+        if self.screenstream_selector.currentIndex() >= 0:
+            return self.screenstream_selector.currentData()
+
+        url = self.screenstream_url_input.text().strip()
+        return url if url else None
 
     def toggle_fullscreen(self):
         """Toggle fullscreen mode"""
