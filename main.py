@@ -741,6 +741,7 @@ class FireDetectionApp(QWidget):
         self.latest_results = None
         self.camera_source = CameraSource.LOCAL
         self.screenstream_pin = None
+        self.mirror_enabled = False  # No mirroring by default (better for HDMI capture)
 
         self.init_ui()
         self.update_ui_state()
@@ -893,6 +894,12 @@ class FireDetectionApp(QWidget):
         self.full_width_checkbox = QCheckBox("Fullscreen Display")
         self.full_width_checkbox.stateChanged.connect(self.toggle_fullscreen)
 
+        # Mirror toggle checkbox
+        self.mirror_checkbox = QCheckBox("Mirror Video")
+        self.mirror_checkbox.setChecked(self.mirror_enabled)
+        self.mirror_checkbox.stateChanged.connect(self.toggle_mirror)
+        self.mirror_checkbox.setToolTip("Mirror/flip the video horizontally (only for local cameras)")
+
         self.conf_threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.conf_threshold_slider.setMinimum(1)
         self.conf_threshold_slider.setMaximum(100)
@@ -905,6 +912,7 @@ class FireDetectionApp(QWidget):
         self.control_buttons_layout.addWidget(self.load_model_button)
         self.control_buttons_layout.addWidget(self.record_checkbox)
         self.control_buttons_layout.addWidget(self.full_width_checkbox)
+        self.control_buttons_layout.addWidget(self.mirror_checkbox)
         self.control_buttons_layout.addWidget(QLabel("Conf Threshold"))
         self.control_buttons_layout.addWidget(self.conf_threshold_slider)
         self.control_buttons_layout.addWidget(self.conf_threshold_label)
@@ -938,6 +946,9 @@ class FireDetectionApp(QWidget):
         self.screenstream_scan_button.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
         self.screenstream_test_button.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
         self.screenstream_selector.setEnabled(self.camera_source == CameraSource.SCREENSTREAM)
+
+        # Only enable mirror for local cameras
+        self.mirror_checkbox.setEnabled(self.camera_source == CameraSource.LOCAL)
 
         self.start_button.setText("Start" if self.state != DetectionState.RUNNING else "Stop")
 
@@ -1090,6 +1101,12 @@ class FireDetectionApp(QWidget):
                                    "4. No firewall is blocking the connection\n"
                                    "5. If the stream requires a PIN, use the 'Set PIN' button")
             msg.exec()
+
+    def toggle_mirror(self):
+        """Toggle the mirror/flip effect for local cameras"""
+        self.mirror_enabled = self.mirror_checkbox.isChecked()
+        status = "enabled" if self.mirror_enabled else "disabled"
+        print(f"Mirror effect {status}")
 
     def update_threshold(self):
         """Update the confidence threshold from slider value"""
@@ -1251,8 +1268,12 @@ class FireDetectionApp(QWidget):
         # Reset no frame counter when we get a frame
         self.no_frame_count = 0
 
-        if self.camera_source == CameraSource.LOCAL:
+        # Apply mirror effect only if enabled and it's a local camera
+        if self.camera_source == CameraSource.LOCAL and self.mirror_enabled:
             frame = cv2.flip(frame, 1)
+            # Add small indicator when mirroring is active
+            cv2.putText(frame, "MIRRORED", (frame.shape[1] - 100, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
         self.video_handler.set_frame(frame)
 
