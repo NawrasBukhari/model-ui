@@ -1,4 +1,5 @@
 import os
+import platform
 import socket
 import sys
 import threading
@@ -6,13 +7,13 @@ import time
 import urllib.request
 from datetime import datetime
 from enum import Enum, auto
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import cv2
 import numpy as np
 import torch
 from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QComboBox, QCheckBox, QFileDialog, QSlider, QSizePolicy, QLineEdit,
@@ -49,6 +50,65 @@ class DetectionState(Enum):
     SCANNING = auto()
     RUNNING = auto()
     ERROR = auto()
+
+
+class AspectRatioLabel(QLabel):
+    """Custom QLabel that maintains 16:9 aspect ratio"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(960, 540)  # 16:9 minimum size
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("border: 1px solid gray; background-color: black;")
+        self._pixmap = None
+
+    def setPixmap(self, pixmap):
+        """Override setPixmap to maintain aspect ratio"""
+        self._pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event):
+        """Custom paint event to center and maintain aspect ratio"""
+        if self._pixmap is None:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Calculate the target rectangle maintaining 16:9 aspect ratio
+        widget_rect = self.rect()
+        widget_aspect = widget_rect.width() / widget_rect.height()
+        target_aspect = 16.0 / 9.0
+
+        if widget_aspect > target_aspect:
+            # Widget is wider than 16:9 - add pillarboxing
+            target_height = widget_rect.height()
+            target_width = int(target_height * target_aspect)
+            x_offset = (widget_rect.width() - target_width) // 2
+            y_offset = 0
+        else:
+            # Widget is taller than 16:9 - add letterboxing
+            target_width = widget_rect.width()
+            target_height = int(target_width / target_aspect)
+            x_offset = 0
+            y_offset = (widget_rect.height() - target_height) // 2
+
+        target_rect = widget_rect.adjusted(x_offset, y_offset, -x_offset, -y_offset)
+
+        # Scale pixmap to fit the target rectangle while maintaining its aspect ratio
+        scaled_pixmap = self._pixmap.scaled(
+            target_rect.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        # Center the scaled pixmap within the target rectangle
+        x = target_rect.x() + (target_rect.width() - scaled_pixmap.width()) // 2
+        y = target_rect.y() + (target_rect.height() - scaled_pixmap.height()) // 2
+
+        painter.drawPixmap(x, y, scaled_pixmap)
 
 
 class ScreenStreamReader:
@@ -320,7 +380,7 @@ class NetworkScanner(QThread):
 
 
 class VideoHandler:
-    """Handles all video-related operations"""
+    """Handles all video-related operations with 1080p support and proper aspect ratio"""
 
     def __init__(self):
         self.capture = None
@@ -330,15 +390,174 @@ class VideoHandler:
         self.record_enabled = False
         self.stream_reader = None
 
+        # Track actual capture properties
+        self.actual_width = 0
+        self.actual_height = 0
+        self.actual_fps = 0
+        self.actual_fourcc = ""
+        self.actual_backend = ""
+
+    def _get_preferred_backend(self) -> int:
+        """Get the preferred OpenCV backend for the current OS"""
+        system = platform.system().lower()
+
+        if system == "windows":
+            # DirectShow is more reliable for UVC devices on Windows
+            return cv2.CAP_DSHOW
+        elif system == "linux":
+            # V4L2 is the standard for Linux
+            return cv2.CAP_V4L2
+        elif system == "darwin":  # macOS
+            # AVFoundation for macOS
+            return cv2.CAP_AVFOUNDATION
+        else:
+            # Generic fallback
+            return cv2.CAP_ANY
+
+    def _get_backend_name(self, backend: int) -> str:
+        """Get human-readable backend name"""
+        backend_names = {
+            cv2.CAP_DSHOW: "DirectShow",
+            cv2.CAP_V4L2: "V4L2",
+            cv2.CAP_AVFOUNDATION: "AVFoundation",
+            cv2.CAP_MSMF: "Media Foundation",
+            cv2.CAP_ANY: "Auto"
+        }
+        return backend_names.get(backend, f"Backend_{backend}")
+
+    def _try_capture_modes(self, source: int) -> Optional[cv2.VideoCapture]:
+        """Try different capture modes to achieve 1080p or best 16:9 resolution"""
+
+        # Preferred 16:9 resolutions in order of preference
+        resolutions_16_9 = [
+            (1920, 1080),  # 1080p
+            (1280, 720),  # 720p
+            (960, 540),  # qHD
+            (854, 480),  # FWVGA
+            (640, 360),  # nHD
+        ]
+
+        # FOURCC formats to try (MJPG is often required for 1080p on USB capture devices)
+        fourcc_formats = ['MJPG', 'YUYV', 'YUY2', 'RGB3']
+
+        preferred_backend = self._get_preferred_backend()
+        backends_to_try = [preferred_backend]
+
+        # Add fallback backends for Windows
+        if platform.system().lower() == "windows" and preferred_backend != cv2.CAP_MSMF:
+            backends_to_try.append(cv2.CAP_MSMF)
+
+        for backend in backends_to_try:
+            print(f"Trying backend: {self._get_backend_name(backend)}")
+
+            try:
+                cap = cv2.VideoCapture(source, backend)
+                if not cap.isOpened():
+                    print(f"  Failed to open with {self._get_backend_name(backend)}")
+                    continue
+
+                # Try different FOURCC and resolution combinations
+                for fourcc_str in fourcc_formats:
+                    for width, height in resolutions_16_9:
+                        print(f"  Trying {width}x{height} with {fourcc_str}...")
+
+                        # Set FOURCC first
+                        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+                        cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+
+                        # Set resolution
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                        cap.set(cv2.CAP_PROP_FPS, 30)
+
+                        # Read back actual values
+                        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+
+                        # Test if we can actually capture a frame
+                        ret, test_frame = cap.read()
+                        if ret and test_frame is not None:
+                            # Check if we got the resolution we wanted (or close to it)
+                            if actual_width >= width * 0.9 and actual_height >= height * 0.9:
+                                # Store the successful configuration
+                                self.actual_width = actual_width
+                                self.actual_height = actual_height
+                                self.actual_fps = actual_fps
+                                self.actual_fourcc = fourcc_str
+                                self.actual_backend = self._get_backend_name(backend)
+
+                                print(
+                                    f"  ✅ Success! Selected mode: {actual_width}x{actual_height}@{actual_fps:.1f} ({fourcc_str}, {self.actual_backend})")
+                                return cap
+
+                        print(f"    Got {actual_width}x{actual_height} instead of {width}x{height}")
+
+                cap.release()
+
+            except Exception as e:
+                print(f"  Error with {self._get_backend_name(backend)}: {e}")
+                continue
+
+        print("❌ Failed to establish 1080p or any 16:9 mode")
+        return None
+
     def open_camera(self, source: Any) -> bool:
-        """Open a video capture source"""
+        """Open a video capture source with 1080p preference"""
         self.release()
+
         if isinstance(source, str) and ("screenstream" in source.lower() or ":8080" in source):
             # Handle ScreenStream separately
             return False  # Will be handled by open_screenstream
+
+        if isinstance(source, int):
+            # Local camera - try to get 1080p
+            print(f"Opening local camera {source} with 1080p preference...")
+            self.capture = self._try_capture_modes(source)
+
+            if self.capture is None:
+                # Final fallback - try basic opening
+                print("Falling back to basic camera opening...")
+                self.capture = cv2.VideoCapture(source)
+
+                if self.capture.isOpened():
+                    # Get whatever resolution we can
+                    self.actual_width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    self.actual_height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    self.actual_fps = self.capture.get(cv2.CAP_PROP_FPS)
+                    self.actual_fourcc = "Unknown"
+                    self.actual_backend = "Default"
+
+                    print(f"⚠️ Fallback mode: {self.actual_width}x{self.actual_height}@{self.actual_fps:.1f}")
+
+            return self.capture is not None and self.capture.isOpened()
+
         else:
+            # Network camera or other source
+            print(f"Opening network source: {source}")
             self.capture = cv2.VideoCapture(source)
+
+            if self.capture.isOpened():
+                self.actual_width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+                self.actual_height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                self.actual_fps = self.capture.get(cv2.CAP_PROP_FPS)
+                self.actual_fourcc = "Network"
+                self.actual_backend = "Network"
+
+                print(f"Network source opened: {self.actual_width}x{self.actual_height}@{self.actual_fps:.1f}")
+
             return self.capture.isOpened()
+
+    def get_capture_info(self) -> dict:
+        """Get information about the current capture"""
+        return {
+            'width': self.actual_width,
+            'height': self.actual_height,
+            'fps': self.actual_fps,
+            'fourcc': self.actual_fourcc,
+            'backend': self.actual_backend,
+            'aspect_ratio': self.actual_width / self.actual_height if self.actual_height > 0 else 1.0
+        }
 
     def open_screenstream(self, url: str, pin: Optional[str] = None) -> bool:
         """Open a ScreenStream source"""
@@ -382,15 +601,15 @@ class VideoHandler:
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
         if self.capture and self.capture.isOpened():
-            width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width = self.actual_width
+            height = self.actual_height
         else:
             # For ScreenStream, we'll get dimensions from the first frame
             frame = self.get_frame()
             if frame is not None:
                 height, width = frame.shape[:2]
             else:
-                width, height = 640, 480  # Default
+                width, height = 1920, 1080  # Default to 1080p
 
         self.video_writer = cv2.VideoWriter(filename, fourcc, 30.0, (width, height))
         self.record_enabled = True
@@ -413,6 +632,13 @@ class VideoHandler:
             self.video_writer.release()
             self.video_writer = None
         self.record_enabled = False
+
+        # Reset capture info
+        self.actual_width = 0
+        self.actual_height = 0
+        self.actual_fps = 0
+        self.actual_fourcc = ""
+        self.actual_backend = ""
 
     def get_frame(self) -> Optional[Any]:
         """Get the current frame"""
@@ -495,7 +721,7 @@ class FireDetectionApp(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YOLO Fire/Smoke Detection - Multi-Source")
+        self.setWindowTitle("YOLO Fire/Smoke Detection - Multi-Source (1080p)")
 
         self.device = self._get_device()
         self.model = None
@@ -533,13 +759,16 @@ class FireDetectionApp(QWidget):
     def init_ui(self):
         """Initialize the user interface"""
 
-        self.video_label = QLabel()
-        self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video_label.setMinimumSize(640, 480)
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Use custom AspectRatioLabel instead of regular QLabel
+        self.video_label = AspectRatioLabel()
+        self.video_label.setText("Video feed will appear here\n(Maintains 16:9 aspect ratio)")
 
         self.device_info_label = QLabel(f"Using device: {self.device}")
         self.device_info_label.setStyleSheet("color: green; font-weight: bold;")
+
+        # Add capture info label
+        self.capture_info_label = QLabel("Capture: Not initialized")
+        self.capture_info_label.setStyleSheet("color: blue; font-weight: bold;")
 
         self.camera_source_group = QGroupBox("Camera Source")
         self._init_camera_source_ui()
@@ -554,6 +783,7 @@ class FireDetectionApp(QWidget):
 
         layout = QVBoxLayout()
         layout.addWidget(self.device_info_label)
+        layout.addWidget(self.capture_info_label)
         layout.addWidget(self.video_label)
 
         source_settings_layout = QHBoxLayout()
@@ -720,6 +950,26 @@ class FireDetectionApp(QWidget):
                 self.camera_selector.addItem(f"Camera {i}")
             cap.release()
 
+    def update_capture_info_display(self):
+        """Update the capture information display"""
+        if hasattr(self, 'capture_info_label'):
+            info = self.video_handler.get_capture_info()
+            if info['width'] > 0:
+                info_text = (f"Capture: {info['width']}x{info['height']}@{info['fps']:.1f}fps "
+                             f"({info['fourcc']}, {info['backend']}) "
+                             f"AR: {info['aspect_ratio']:.2f}")
+                self.capture_info_label.setText(info_text)
+
+                # Color code based on resolution
+                if info['width'] >= 1920:
+                    color = "green"  # 1080p or higher
+                elif info['width'] >= 1280:
+                    color = "orange"  # 720p
+                else:
+                    color = "red"  # Lower than 720p
+
+                self.capture_info_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
     def set_screenstream_pin(self):
         """Set a PIN code for accessing protected ScreenStream"""
         pin, ok = QInputDialog.getText(
@@ -823,13 +1073,7 @@ class FireDetectionApp(QWidget):
 
         if success:
             # Display test frame
-            height, width, channels = frame.shape
-            bytes_per_line = channels * width
-            img = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
-            pix = QPixmap.fromImage(img).scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                                Qt.TransformationMode.SmoothTransformation)
-            self.video_label.setPixmap(pix)
-
+            self._display_frame(frame)
             self.status_label.setText(f"✅ ScreenStream connected successfully using {working_method}!")
             QMessageBox.information(self, "Connection Successful",
                                     f"Successfully connected to the ScreenStream using {working_method}.")
@@ -889,7 +1133,7 @@ class FireDetectionApp(QWidget):
             self.start_detection()
 
     def start_detection(self):
-        """Start the detection process"""
+        """Start the detection process with enhanced capture info logging"""
         if not self.model:
             self.status_label.setText("⚠️ Please load a model first.")
             return
@@ -904,6 +1148,17 @@ class FireDetectionApp(QWidget):
             cam_index = int(self.camera_selector.currentText().split()[-1])
             source_desc = f"Camera {cam_index}"
             success = self.video_handler.open_camera(cam_index)
+
+            # Update capture info display for local cameras
+            if success:
+                self.update_capture_info_display()
+                info = self.video_handler.get_capture_info()
+                print(f"Capture opened successfully:")
+                print(f"  Resolution: {info['width']}x{info['height']}")
+                print(f"  FPS: {info['fps']:.1f}")
+                print(f"  FOURCC: {info['fourcc']}")
+                print(f"  Backend: {info['backend']}")
+                print(f"  Aspect Ratio: {info['aspect_ratio']:.2f}")
 
         elif self.camera_source == CameraSource.WIFI:
             url = self.wifi_url_input.text().strip()
@@ -960,6 +1215,8 @@ class FireDetectionApp(QWidget):
         self.timer.stop()
         self.state = DetectionState.IDLE
         self.status_label.setText("🛑 Detection stopped")
+        self.capture_info_label.setText("Capture: Not initialized")
+        self.capture_info_label.setStyleSheet("color: blue; font-weight: bold;")
         self.update_ui_state()
 
     def _on_detection_complete(self, results, detection):
@@ -1023,15 +1280,27 @@ class FireDetectionApp(QWidget):
         return frame
 
     def _display_frame(self, frame):
-        """Display the frame in the UI"""
+        """Enhanced frame display method that ensures proper aspect ratio"""
+        if frame is None:
+            return
+
+        # Get frame dimensions
         height, width, channels = frame.shape
+        frame_aspect = width / height
+
+        # Log if the frame is not 16:9 (for debugging)
+        target_aspect = 16.0 / 9.0
+        if abs(frame_aspect - target_aspect) > 0.1:
+            print(f"Warning: Frame aspect ratio {frame_aspect:.2f} is not 16:9 ({target_aspect:.2f})")
+
+        # Convert frame to QImage
         bytes_per_line = channels * width
         img = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
-        pix = QPixmap.fromImage(img).scaled(
-            self.video_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
+
+        # Convert to QPixmap
+        pix = QPixmap.fromImage(img)
+
+        # Let the AspectRatioLabel handle the proper scaling and centering
         self.video_label.setPixmap(pix)
 
     def _play_alert_sound(self):
