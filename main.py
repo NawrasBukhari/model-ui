@@ -276,7 +276,7 @@ class NetworkScanner(QThread):
                 break
 
             progress = int((i / len(self.ip_range)) * 100)
-            self.update_progress.emit(progress)  # type: ignore
+            self.update_progress.emit(progress)
 
             for application in MOBILE_CAMERA_APPS:
                 if self._check_port(ip, application.port):
@@ -285,7 +285,7 @@ class NetworkScanner(QThread):
                     self.found_devices.append({"name": device_name, "url": url})
                     break
 
-        self.scan_complete.emit(self.found_devices)  # type: ignore
+        self.scan_complete.emit(self.found_devices)
 
     def _scan_screenstream(self):
         """Scan for ScreenStream devices"""
@@ -294,14 +294,14 @@ class NetworkScanner(QThread):
                 break
 
             progress = int((i / len(self.ip_range)) * 100)
-            self.update_progress.emit(progress)  # type: ignore
+            self.update_progress.emit(progress)
 
             if self._check_port(ip, 8080):
                 device_name = f"ScreenStream Device ({ip})"
                 url = f"http://{ip}:8080"
                 self.found_devices.append({"name": device_name, "url": url})
 
-        self.scan_complete.emit(self.found_devices)  # type: ignore
+        self.scan_complete.emit(self.found_devices)
 
     @staticmethod
     def _check_port(ip: str, port: int) -> bool:
@@ -379,7 +379,7 @@ class VideoHandler:
         if not self.capture and not self.stream_reader:
             return False
 
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')  # type: ignore
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
         if self.capture and self.capture.isOpened():
             width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -479,7 +479,7 @@ class DetectionThread(QThread):
                                 detection = True
                                 break
 
-                self.detection_complete.emit(results, detection)  # type: ignore
+                self.detection_complete.emit(results, detection)
             except Exception as e:
                 print(f"Detection error: {e}")
 
@@ -517,6 +517,7 @@ class FireDetectionApp(QWidget):
         self.screenstream_pin = None
 
         self.init_ui()
+        self.update_ui_state()
 
     @staticmethod
     def _get_device() -> str:
@@ -566,10 +567,7 @@ class FireDetectionApp(QWidget):
         self.setLayout(layout)
 
         self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)  # type: ignore
-
-        # Initialize UI state after all widgets are created
-        self.update_ui_state()
+        self.timer.timeout.connect(self.update_frame)
 
     def _init_camera_source_ui(self):
         """Initialize camera source selection UI"""
@@ -581,21 +579,12 @@ class FireDetectionApp(QWidget):
         self.screenstream_radio = QRadioButton("ScreenStream (Android)")
         self.local_camera_radio.setChecked(True)
 
-        # Connect each radio button individually for better control
-        self.local_camera_radio.toggled.connect(  # type: ignore
-            lambda checked: self._on_camera_source_changed(self.local_camera_radio) if checked else None)
-        self.wifi_camera_radio.toggled.connect(  # type: ignore
-            lambda checked: self._on_camera_source_changed(self.wifi_camera_radio) if checked else None)
-        self.mobile_camera_radio.toggled.connect(  # type: ignore
-            lambda checked: self._on_camera_source_changed(self.mobile_camera_radio) if checked else None)
-        self.screenstream_radio.toggled.connect(  # type: ignore
-            lambda checked: self._on_camera_source_changed(self.screenstream_radio) if checked else None)
-
         button_group = QButtonGroup()
         button_group.addButton(self.local_camera_radio)
         button_group.addButton(self.wifi_camera_radio)
         button_group.addButton(self.mobile_camera_radio)
         button_group.addButton(self.screenstream_radio)
+        button_group.buttonClicked.connect(self._on_camera_source_changed)
 
         layout.addWidget(self.local_camera_radio)
         layout.addWidget(self.wifi_camera_radio)
@@ -616,7 +605,7 @@ class FireDetectionApp(QWidget):
         self.wifi_url_input = QLineEdit()
         self.wifi_url_input.setPlaceholderText("rtsp://username:password@ip_address:port/path")
         self.test_connection_button = QPushButton("Test Connection")
-        self.test_connection_button.clicked.connect(self.test_connection)  # type: ignore
+        self.test_connection_button.clicked.connect(self.test_connection)
         wifi_layout = QHBoxLayout()
         wifi_layout.addWidget(self.wifi_url_input)
         wifi_layout.addWidget(self.test_connection_button)
@@ -626,7 +615,7 @@ class FireDetectionApp(QWidget):
         self.mobile_camera_selector = QComboBox()
         self.mobile_camera_selector.setPlaceholderText("Select a mobile camera...")
         self.mobile_scan_button = QPushButton("Scan Network")
-        self.mobile_scan_button.clicked.connect(self.scan_for_mobile_cameras)  # type: ignore
+        self.mobile_scan_button.clicked.connect(self.scan_for_mobile_cameras)
         mobile_scan_layout = QHBoxLayout()
         mobile_scan_layout.addWidget(self.mobile_camera_selector)
         mobile_scan_layout.addWidget(self.mobile_scan_button)
@@ -640,11 +629,11 @@ class FireDetectionApp(QWidget):
         self.screenstream_url_input = QLineEdit()
         self.screenstream_url_input.setPlaceholderText("http://192.168.1.100:8080")
         self.screenstream_pin_button = QPushButton("Set PIN")
-        self.screenstream_pin_button.clicked.connect(self.set_screenstream_pin)  # type: ignore
+        self.screenstream_pin_button.clicked.connect(self.set_screenstream_pin)
         self.screenstream_scan_button = QPushButton("Auto-Detect")
-        self.screenstream_scan_button.clicked.connect(self.scan_for_screenstream)  # type: ignore
+        self.screenstream_scan_button.clicked.connect(self.scan_for_screenstream)
         self.screenstream_test_button = QPushButton("Test")
-        self.screenstream_test_button.clicked.connect(self.test_screenstream_connection)  # type: ignore
+        self.screenstream_test_button.clicked.connect(self.test_screenstream_connection)
 
         screenstream_layout = QHBoxLayout()
         screenstream_layout.addWidget(self.screenstream_url_input)
@@ -664,21 +653,21 @@ class FireDetectionApp(QWidget):
         self.control_buttons_layout = QHBoxLayout()
 
         self.start_button = QPushButton("Start")
-        self.start_button.clicked.connect(self.toggle_detection)  # type: ignore
+        self.start_button.clicked.connect(self.toggle_detection)
         self.snapshot_button = QPushButton("Save Snapshot")
-        self.snapshot_button.clicked.connect(self.save_snapshot)  # type: ignore
+        self.snapshot_button.clicked.connect(self.save_snapshot)
         self.load_model_button = QPushButton("Load Model")
-        self.load_model_button.clicked.connect(self.load_model)  # type: ignore
+        self.load_model_button.clicked.connect(self.load_model)
 
         self.record_checkbox = QCheckBox("Enable Recording")
         self.full_width_checkbox = QCheckBox("Fullscreen Display")
-        self.full_width_checkbox.stateChanged.connect(self.toggle_fullscreen)  # type: ignore
+        self.full_width_checkbox.stateChanged.connect(self.toggle_fullscreen)
 
         self.conf_threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.conf_threshold_slider.setMinimum(1)
         self.conf_threshold_slider.setMaximum(100)
         self.conf_threshold_slider.setValue(int(self.conf_threshold * 100))
-        self.conf_threshold_slider.valueChanged.connect(self.update_threshold)  # type: ignore
+        self.conf_threshold_slider.valueChanged.connect(self.update_threshold)
         self.conf_threshold_label = QLabel(f"{self.conf_threshold_slider.value()}%")
 
         self.control_buttons_layout.addWidget(self.start_button)
@@ -692,20 +681,15 @@ class FireDetectionApp(QWidget):
 
     def _on_camera_source_changed(self, button):
         """Handle camera source selection change"""
-        print(f"Camera source changed to: {button.text()}")  # Debug print
-
         if button == self.local_camera_radio:
             self.camera_source = CameraSource.LOCAL
         elif button == self.wifi_camera_radio:
             self.camera_source = CameraSource.WIFI
         elif button == self.mobile_camera_radio:
             self.camera_source = CameraSource.MOBILE
-        elif button == self.screenstream_radio:
+        else:
             self.camera_source = CameraSource.SCREENSTREAM
-
-        # Force UI update
         self.update_ui_state()
-        print(f"New camera source: {self.camera_source}")  # Debug print
 
     def update_ui_state(self):
         """Update UI elements based on current state"""
@@ -759,9 +743,9 @@ class FireDetectionApp(QWidget):
         self.progress_dialog.setModal(True)
 
         self.network_scanner = NetworkScanner(scan_type="screenstream")
-        self.network_scanner.update_progress.connect(self.progress_dialog.setValue)  # type: ignore
-        self.network_scanner.scan_complete.connect(self._on_screenstream_scan_complete)  # type: ignore
-        self.progress_dialog.canceled.connect(self.network_scanner.stop)  # type: ignore
+        self.network_scanner.update_progress.connect(self.progress_dialog.setValue)
+        self.network_scanner.scan_complete.connect(self._on_screenstream_scan_complete)
+        self.progress_dialog.canceled.connect(self.network_scanner.stop)
 
         self.network_scanner.start()
         self.progress_dialog.show()
@@ -957,7 +941,7 @@ class FireDetectionApp(QWidget):
         self.detection_thread = DetectionThread(
             self.model, self.video_handler, self.conf_threshold, device
         )
-        self.detection_thread.detection_complete.connect(self._on_detection_complete)  # type: ignore
+        self.detection_thread.detection_complete.connect(self._on_detection_complete)
         self.detection_thread.start()
 
         self.timer.start(30)
@@ -1124,9 +1108,9 @@ class FireDetectionApp(QWidget):
         self.progress_dialog.setModal(True)
 
         self.network_scanner = NetworkScanner(scan_type="mobile")
-        self.network_scanner.update_progress.connect(self.progress_dialog.setValue)  # type: ignore
-        self.network_scanner.scan_complete.connect(self._on_mobile_scan_complete)  # type: ignore
-        self.progress_dialog.canceled.connect(self.network_scanner.stop)  # type: ignore
+        self.network_scanner.update_progress.connect(self.progress_dialog.setValue)
+        self.network_scanner.scan_complete.connect(self._on_mobile_scan_complete)
+        self.progress_dialog.canceled.connect(self.network_scanner.stop)
 
         self.network_scanner.start()
         self.progress_dialog.show()
