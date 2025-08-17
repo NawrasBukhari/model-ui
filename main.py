@@ -722,6 +722,7 @@ class FireDetectionApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("YOLO Fire/Smoke Detection - Multi-Source (1080p)")
+        self.resize(1280, 720)
 
         self.device = self._get_device()
         self.model = None
@@ -759,15 +760,13 @@ class FireDetectionApp(QWidget):
 
     def init_ui(self):
         """Initialize the user interface"""
-
-        # Use custom AspectRatioLabel instead of regular QLabel
+        # Main widgets
         self.video_label = AspectRatioLabel()
         self.video_label.setText("Video feed will appear here\n(Maintains 16:9 aspect ratio)")
 
         self.device_info_label = QLabel(f"Using device: {self.device}")
         self.device_info_label.setStyleSheet("color: green; font-weight: bold;")
 
-        # Add capture info label
         self.capture_info_label = QLabel("Capture: Not initialized")
         self.capture_info_label.setStyleSheet("color: blue; font-weight: bold;")
 
@@ -779,9 +778,29 @@ class FireDetectionApp(QWidget):
 
         self._init_control_buttons()
 
+        # Bottom menu (status bar)
         self.status_label = QLabel("Status: Ready")
         self.detection_counts_label = QLabel("Detections: None")
 
+        # Create a container for the bottom menu
+        self.bottom_menu = QWidget()
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addWidget(self.status_label)
+        bottom_layout.addWidget(self.detection_counts_label)
+        bottom_layout.addStretch()
+        self.bottom_menu.setLayout(bottom_layout)
+        self.bottom_menu.setStyleSheet("""
+            QWidget {
+                background-color: rgba(0, 0, 0, 150);
+                padding: 5px;
+            }
+            QLabel {
+                color: white;
+                font-weight: bold;
+            }
+        """)
+
+        # Main layout
         layout = QVBoxLayout()
         layout.addWidget(self.device_info_label)
         layout.addWidget(self.capture_info_label)
@@ -793,8 +812,7 @@ class FireDetectionApp(QWidget):
         layout.addLayout(source_settings_layout)
 
         layout.addLayout(self.control_buttons_layout)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.detection_counts_label)
+        layout.addWidget(self.bottom_menu)  # Add the bottom menu
         self.setLayout(layout)
 
         self.timer = QTimer()
@@ -916,6 +934,37 @@ class FireDetectionApp(QWidget):
         self.control_buttons_layout.addWidget(QLabel("Conf Threshold"))
         self.control_buttons_layout.addWidget(self.conf_threshold_slider)
         self.control_buttons_layout.addWidget(self.conf_threshold_label)
+
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode"""
+        if self.full_width_checkbox.isChecked():
+            # Hide all widgets except the video label and bottom menu
+            self.device_info_label.hide()
+            self.capture_info_label.hide()
+            self.camera_source_group.hide()
+            self.camera_settings_box.hide()
+            self.control_buttons_layout.parentWidget().hide()
+
+            # Show fullscreen
+            self.showFullScreen()
+
+            # Adjust layout to maximize video display
+            self.layout().setContentsMargins(0, 0, 0, 0)
+            self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        else:
+            # Show all widgets when exiting fullscreen
+            self.device_info_label.show()
+            self.capture_info_label.show()
+            self.camera_source_group.show()
+            self.camera_settings_box.show()
+            self.control_buttons_layout.parentWidget().show()
+
+            # Return to normal window
+            self.showNormal()
+
+            # Restore normal layout margins
+            self.layout().setContentsMargins(9, 9, 9, 9)
+            self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def _on_camera_source_changed(self, button):
         """Handle camera source selection change"""
@@ -1451,13 +1500,6 @@ class FireDetectionApp(QWidget):
 
         url = self.screenstream_url_input.text().strip()
         return url if url else None
-
-    def toggle_fullscreen(self):
-        """Toggle fullscreen mode"""
-        if self.full_width_checkbox.isChecked():
-            self.showFullScreen()
-        else:
-            self.showNormal()
 
     def closeEvent(self, event):
         """Handle application close event"""
