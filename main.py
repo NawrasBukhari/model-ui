@@ -12,13 +12,13 @@ from typing import Optional, List, Dict, Any, Tuple
 import cv2
 import numpy as np
 import torch
-from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal, QSettings
 from PyQt6.QtGui import QImage, QPixmap, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QComboBox, QCheckBox, QFileDialog, QSlider, QSizePolicy, QLineEdit,
     QGroupBox, QFormLayout, QRadioButton, QButtonGroup, QMessageBox,
-    QProgressDialog, QInputDialog
+    QProgressDialog, QInputDialog, QSpinBox
 )
 from ultralytics import YOLO
 
@@ -530,7 +530,13 @@ class VideoHandler:
 
                     print(f"⚠️ Fallback mode: {self.actual_width}x{self.actual_height}@{self.actual_fps:.1f}")
 
-            return self.capture is not None and self.capture.isOpened()
+            opened = self.capture is not None and self.capture.isOpened()
+            if opened:
+                try:
+                    self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+            return opened
 
         else:
             # Network camera or other source
@@ -545,6 +551,10 @@ class VideoHandler:
                 self.actual_backend = "Network"
 
                 print(f"Network source opened: {self.actual_width}x{self.actual_height}@{self.actual_fps:.1f}")
+                try:
+                    self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
 
             return self.capture.isOpened()
 
@@ -665,23 +675,115 @@ class VideoHandler:
             return False, None
 
 
+class BoundedFrameQueue:
+    """Thread-safe bounded queue that keeps only the latest few frames."""
+
+    def __init__(self, max_size: int = 2):
+        self.max_size = max_size
+        self._queue: List[Any] = []
+        self._lock = threading.Lock()
+
+    def put_latest(self, item: Any) -> None:
+        with self._lock:
+            self._queue.append(item)
+            while len(self._queue) > self.max_size:
+                self._queue.pop(0)
+
+    def get_latest(self) -> Optional[Any]:
+        with self._lock:
+            if not self._queue:
+                return None
+            # Return the most recent frame and drop older ones
+            latest = self._queue[-1]
+            self._queue.clear()
+            return latest
+
+
+class CaptureThread(QThread):
+    """Continuously reads frames to keep UI responsive and avoid lag."""
+
+    def __init__(self, video_handler: VideoHandler, frame_queue: Optional[BoundedFrameQueue] = None, fps_cap: Optional[int] = None):
+        super().__init__()
+        self.video_handler = video_handler
+        self.frame_queue = frame_queue
+        self.fps_cap = fps_cap
+        self.running = False
+
+    def run(self):
+        self.running = True
+        last_time = 0.0
+        interval = 1.0 / self.fps_cap if self.fps_cap and self.fps_cap > 0 else 0.0
+        while self.running:
+            ret, frame = self.video_handler.read_frame()
+            if ret and frame is not None:
+                self.video_handler.set_frame(frame)
+                if self.frame_queue is not None:
+                    self.frame_queue.put_latest(frame)
+
+            if interval > 0.0:
+                now = time.time()
+                sleep_for = interval - (now - last_time)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                last_time = now
+            else:
+                time.sleep(0.001)
+
+    def stop(self):
+        self.running = False
+
+
+class ModelLoaderThread(QThread):
+    """Background loader for YOLO models with optional warmup."""
+    loaded = pyqtSignal(object, bool, str)
+
+    def __init__(self, file_path: str, device: str, imgsz: int, half: bool):
+        super().__init__()
+        self.file_path = file_path
+        self.device = device
+        self.imgsz = imgsz
+        self.half = half
+
+    def run(self):
+        try:
+            model = YOLO(self.file_path)
+            # Move to device
+            model.to(self.device)
+
+            # Warmup with a dummy frame to compile CUDA kernels / optimize graph
+            dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+            # For half precision, Ultralytics accepts predict(half=True)
+            model.predict(source=dummy, imgsz=self.imgsz, device=self.device, half=self.half, conf=0.1)
+
+            self.loaded.emit(model, True, "")
+        except Exception as e:
+            self.loaded.emit(None, False, str(e))
+
 class DetectionThread(QThread):
     """Thread for running YOLO detection"""
     detection_complete = pyqtSignal(object, bool)
 
-    def __init__(self, model: Any, video_handler: VideoHandler, conf_threshold: float, device: str):
+    def __init__(self, model: Any, video_handler: VideoHandler, conf_threshold: float, device: str, frame_queue: Optional['BoundedFrameQueue'] = None, imgsz: int = 640, half: bool = False):
         super().__init__()
         self.model = model
         self.video_handler = video_handler
         self.conf_threshold = conf_threshold
         self.device = device
+        self.frame_queue = frame_queue
+        self.imgsz = imgsz
+        self.half = half
         self.running = False
 
     def run(self):
         """Main detection loop"""
         self.running = True
         while self.running:
-            frame = self.video_handler.get_frame()
+            # Prefer consuming from queue to avoid stale frames
+            frame = None
+            if self.frame_queue is not None:
+                frame = self.frame_queue.get_latest()
+            if frame is None:
+                frame = self.video_handler.get_frame()
             if frame is None:
                 time.sleep(0.1)
                 continue
@@ -690,7 +792,9 @@ class DetectionThread(QThread):
                 results = self.model.predict(
                     source=frame,
                     conf=self.conf_threshold,
-                    device=self.device
+                    device=self.device,
+                    imgsz=self.imgsz,
+                    half=self.half
                 )
 
                 detection = False
@@ -728,6 +832,8 @@ class FireDetectionApp(QWidget):
         self.model = None
         self.model_path = None
         self.video_handler = VideoHandler()
+        self.frame_queue = BoundedFrameQueue(max_size=2)
+        self.capture_thread = None
         self.detection_thread = None
         self.network_scanner = None
         self.progress_dialog = None
@@ -736,6 +842,8 @@ class FireDetectionApp(QWidget):
 
         self.state = DetectionState.IDLE
         self.conf_threshold = 0.1
+        self.imgsz = 640
+        self.use_half = False
         self.alert_interval = 5
         self.last_alert_time = 0
         self.alert_triggered = False
@@ -743,6 +851,11 @@ class FireDetectionApp(QWidget):
         self.camera_source = CameraSource.LOCAL
         self.screenstream_pin = None
         self.mirror_enabled = False  # No mirroring by default (better for HDMI capture)
+        self.fps_cap = 30
+
+        # Settings
+        self.settings = QSettings("FireDetectionApp", "ProductionUI")
+        self._load_settings()
 
         self.init_ui()
         self.update_ui_state()
@@ -777,6 +890,7 @@ class FireDetectionApp(QWidget):
         self._init_camera_settings_ui()
 
         self._init_control_buttons()
+        self._init_performance_controls()
 
         # Bottom menu (status bar)
         self.status_label = QLabel("Status: Ready")
@@ -818,6 +932,108 @@ class FireDetectionApp(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
 
+    def _init_performance_controls(self):
+        perf_layout = QHBoxLayout()
+        # Device selection (read-only display + choice)
+        self.device_selector = QComboBox()
+        # Available options based on runtime detection
+        options = ["cpu"]
+        if torch.cuda.is_available():
+            options.insert(0, "cuda")
+        try:
+            if torch.backends.mps.is_available():
+                options.append("mps")
+        except Exception:
+            pass
+        for opt in options:
+            self.device_selector.addItem(opt)
+        self.device_selector.setCurrentText(self.device.split()[0].lower())
+        self.device_selector.currentTextChanged.connect(self._on_device_changed)
+
+        # Inference size
+        self.imgsz_spin = QSpinBox()
+        self.imgsz_spin.setRange(320, 1920)
+        self.imgsz_spin.setSingleStep(32)
+        self.imgsz_spin.setValue(self.imgsz)
+        self.imgsz_spin.valueChanged.connect(self._on_imgsz_changed)
+
+        # FPS cap
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 120)
+        self.fps_spin.setValue(self.fps_cap)
+        self.fps_spin.valueChanged.connect(self._on_fps_changed)
+
+        # Half precision
+        self.half_checkbox = QCheckBox("Half Precision")
+        self.half_checkbox.setChecked(self.use_half)
+        self.half_checkbox.stateChanged.connect(self._on_half_changed)
+
+        # Fast annotate
+        self.fast_annotate_checkbox = QCheckBox("Fast Annotate")
+        self.fast_annotate_checkbox.setChecked(False)
+
+        perf_layout.addWidget(QLabel("Device"))
+        perf_layout.addWidget(self.device_selector)
+        perf_layout.addWidget(QLabel("imgsz"))
+        perf_layout.addWidget(self.imgsz_spin)
+        perf_layout.addWidget(QLabel("FPS cap"))
+        perf_layout.addWidget(self.fps_spin)
+        perf_layout.addWidget(self.half_checkbox)
+        perf_layout.addWidget(self.fast_annotate_checkbox)
+
+        # Attach below existing controls
+        self.control_buttons_layout.addLayout(perf_layout)
+
+    def _on_device_changed(self, text: str):
+        self.device = text
+        self.device_info_label.setText(f"Using device: {self.device}")
+        self._save_settings()
+
+    def _on_imgsz_changed(self, value: int):
+        self.imgsz = value
+        self._save_settings()
+
+    def _on_fps_changed(self, value: int):
+        self.fps_cap = value
+        self._save_settings()
+
+    def _on_half_changed(self, state):
+        self.use_half = self.half_checkbox.isChecked()
+        self._save_settings()
+
+    def _save_settings(self):
+        self.settings.setValue("device", self.device)
+        self.settings.setValue("imgsz", self.imgsz)
+        self.settings.setValue("fps_cap", self.fps_cap)
+        self.settings.setValue("use_half", self.use_half)
+        self.settings.setValue("conf", self.conf_threshold)
+
+    def _load_settings(self):
+        device = self.settings.value("device")
+        if device:
+            self.device = str(device)
+        imgsz = self.settings.value("imgsz")
+        if imgsz:
+            try:
+                self.imgsz = int(imgsz)
+            except Exception:
+                pass
+        fps_cap = self.settings.value("fps_cap")
+        if fps_cap:
+            try:
+                self.fps_cap = int(fps_cap)
+            except Exception:
+                pass
+        use_half = self.settings.value("use_half")
+        if use_half is not None:
+            self.use_half = str(use_half).lower() in ("1", "true", "yes")
+        conf = self.settings.value("conf")
+        if conf:
+            try:
+                self.conf_threshold = float(conf)
+            except Exception:
+                pass
+
     def _init_camera_source_ui(self):
         """Initialize camera source selection UI"""
         layout = QVBoxLayout()
@@ -828,12 +1044,13 @@ class FireDetectionApp(QWidget):
         self.screenstream_radio = QRadioButton("ScreenStream (Android)")
         self.local_camera_radio.setChecked(True)
 
-        button_group = QButtonGroup()
-        button_group.addButton(self.local_camera_radio)
-        button_group.addButton(self.wifi_camera_radio)
-        button_group.addButton(self.mobile_camera_radio)
-        button_group.addButton(self.screenstream_radio)
-        button_group.buttonClicked.connect(self._on_camera_source_changed)
+        # Keep a persistent reference to the button group so signals remain connected
+        self.camera_source_button_group = QButtonGroup(self)
+        self.camera_source_button_group.addButton(self.local_camera_radio)
+        self.camera_source_button_group.addButton(self.wifi_camera_radio)
+        self.camera_source_button_group.addButton(self.mobile_camera_radio)
+        self.camera_source_button_group.addButton(self.screenstream_radio)
+        self.camera_source_button_group.buttonClicked.connect(self._on_camera_source_changed)
 
         layout.addWidget(self.local_camera_radio)
         layout.addWidget(self.wifi_camera_radio)
@@ -1170,18 +1387,34 @@ class FireDetectionApp(QWidget):
         if not file_path:
             return
 
-        try:
-            self.model_path = file_path
-            device = self.device.split()[0].lower()
-            self.model = YOLO(self.model_path)
-            self.model.to(device)
-            self.status_label.setText(f"✅ Loaded model: {file_path.split('/')[-1]} on {self.device}")
-        except Exception as e:
-            self.status_label.setText(f"❌ Failed to load model: {str(e)}")
-            QMessageBox.critical(
-                self, "Model Loading Error",
-                f"Error loading model: {str(e)}\n\nDetails: {sys.exc_info()[2]}"
-            )
+        # Show loader dialog
+        loader = QProgressDialog("Loading model...", None, 0, 0, self)
+        loader.setWindowTitle("Loading")
+        loader.setCancelButton(None)
+        loader.setModal(True)
+        loader.show()
+        QApplication.processEvents()
+
+        # Start background loader
+        self.model_loader = ModelLoaderThread(
+            file_path=file_path,
+            device=self.device.split()[0].lower(),
+            imgsz=self.imgsz,
+            half=self.use_half
+        )
+
+        def on_loaded(model, ok, err):
+            loader.hide()
+            if ok and model is not None:
+                self.model_path = file_path
+                self.model = model
+                self.status_label.setText(f"✅ Loaded model: {os.path.basename(file_path)} on {self.device}")
+            else:
+                self.status_label.setText(f"❌ Failed to load model: {err}")
+                QMessageBox.critical(self, "Model Loading Error", f"Error loading model: {err}")
+
+        self.model_loader.loaded.connect(on_loaded)
+        self.model_loader.start()
 
     def save_snapshot(self):
         """Save the current frame as an image"""
@@ -1258,20 +1491,34 @@ class FireDetectionApp(QWidget):
             filename = f"output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.avi"
             self.video_handler.start_recording(filename)
 
+        # Start capture thread to continuously fetch frames (decouples capture from UI render)
+        if self.capture_thread:
+            try:
+                self.capture_thread.stop()
+                self.capture_thread.wait()
+            except Exception:
+                pass
+        self.capture_thread = CaptureThread(self.video_handler, self.frame_queue, fps_cap=self.fps_cap)
+        self.capture_thread.start()
+
         device = self.device.split()[0].lower()
         self.detection_thread = DetectionThread(
-            self.model, self.video_handler, self.conf_threshold, device
+            self.model, self.video_handler, self.conf_threshold, device, frame_queue=self.frame_queue, imgsz=self.imgsz, half=self.use_half
         )
         self.detection_thread.detection_complete.connect(self._on_detection_complete)
         self.detection_thread.start()
 
-        self.timer.start(30)
+        self.timer.start(int(1000 / max(1, self.fps_cap)))
         self.state = DetectionState.RUNNING
         self.status_label.setText(f"✅ Detection started on {source_desc}")
         self.update_ui_state()
 
     def stop_detection(self):
         """Stop the detection process"""
+        if self.capture_thread:
+            self.capture_thread.stop()
+            self.capture_thread.wait()
+            self.capture_thread = None
         if self.detection_thread:
             self.detection_thread.stop()
             self.detection_thread.wait()
@@ -1297,9 +1544,9 @@ class FireDetectionApp(QWidget):
             self.detection_counts_label.setText("Detections: None")
 
     def update_frame(self):
-        """Update the video frame display"""
-        ret, frame = self.video_handler.read_frame()
-        if not ret:
+        """Update the video frame display using the latest captured frame"""
+        frame = self.video_handler.get_frame()
+        if frame is None:
             if self.state == DetectionState.RUNNING:
                 # Check if it's a ScreenStream that might just be waiting for frames
                 if self.camera_source == CameraSource.SCREENSTREAM:
@@ -1310,8 +1557,7 @@ class FireDetectionApp(QWidget):
                         self.status_label.setText(f"⌛ Waiting for ScreenStream frames... ({no_frame_count // 30}s)")
                     return
                 else:
-                    self.status_label.setText("⚠️ Camera disconnected")
-                    self.stop_detection()
+                    self.status_label.setText("⚠️ Waiting for frames...")
             return
 
         # Reset no frame counter when we get a frame
@@ -1324,8 +1570,6 @@ class FireDetectionApp(QWidget):
             cv2.putText(frame, "MIRRORED", (frame.shape[1] - 100, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
 
-        self.video_handler.set_frame(frame)
-
         annotated_frame = self._annotate_frame(frame)
 
         self.video_handler.write_frame(annotated_frame)
@@ -1337,7 +1581,26 @@ class FireDetectionApp(QWidget):
     def _annotate_frame(self, frame):
         """Annotate the frame with detection results and timestamp"""
         if self.latest_results:
-            frame = self.latest_results[0].plot()
+            if self.fast_annotate_checkbox.isChecked():
+                # Fast path: draw minimal boxes for detected fire/smoke only
+                try:
+                    r = self.latest_results[0]
+                    names = r.names
+                    if r.boxes is not None:
+                        for b in r.boxes:
+                            cls_id = int(b.cls.item())
+                            label = names[cls_id].lower()
+                            if ("fire" in label) or ("smoke" in label):
+                                xyxy = b.xyxy[0].cpu().numpy().astype(int)
+                                x1, y1, x2, y2 = xyxy
+                                color = (0, 0, 255) if "fire" in label else (0, 165, 255)
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                                cv2.putText(frame, label, (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                except Exception:
+                    # Fallback silently to full plot if anything goes wrong
+                    frame = self.latest_results[0].plot()
+            else:
+                frame = self.latest_results[0].plot()
 
         if self.alert_triggered:
             cv2.putText(frame, "FIRE/SMOKE DETECTED", (10, 40),
@@ -1414,6 +1677,11 @@ class FireDetectionApp(QWidget):
             return
 
         self.status_label.setText("Testing connection...")
+        loader = QProgressDialog("Connecting to camera...", None, 0, 0, self)
+        loader.setWindowTitle("Connecting")
+        loader.setCancelButton(None)
+        loader.setModal(True)
+        loader.show()
         QApplication.processEvents()
 
         cap = cv2.VideoCapture(url)
@@ -1433,6 +1701,7 @@ class FireDetectionApp(QWidget):
                     "Could not connect to the WiFi camera. Please check the URL."
                 )
         cap.release()
+        loader.hide()
 
     def scan_for_mobile_cameras(self):
         """Scan the local network for mobile IP cameras"""
