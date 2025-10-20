@@ -2435,6 +2435,35 @@ class FireDetectionApp(QWidget):
 
         self._play_alert_sound()
 
+    def _adjust_detection_coordinates(self, xyxy, original_frame_shape, cropped_frame_shape, crop_params):
+        """Adjust detection coordinates from original frame to cropped frame"""
+        if not self.crop_enabled:
+            return xyxy
+        
+        x1, y1, x2, y2 = xyxy
+        orig_height, orig_width = original_frame_shape[:2]
+        crop_height, crop_width = cropped_frame_shape[:2]
+        
+        # Convert crop percentages to pixel coordinates on original frame
+        crop_x1 = int((crop_params['x'] / 100.0) * orig_width)
+        crop_y1 = int((crop_params['y'] / 100.0) * orig_height)
+        crop_x2 = int(((crop_params['x'] + crop_params['width']) / 100.0) * orig_width)
+        crop_y2 = int(((crop_params['y'] + crop_params['height']) / 100.0) * orig_height)
+        
+        # Adjust detection coordinates relative to crop area
+        adj_x1 = x1 - crop_x1
+        adj_y1 = y1 - crop_y1
+        adj_x2 = x2 - crop_x1
+        adj_y2 = y2 - crop_y1
+        
+        # Check if detection is within crop bounds
+        if (adj_x1 < 0 or adj_y1 < 0 or 
+            adj_x2 > crop_width or adj_y2 > crop_height or
+            adj_x1 >= crop_width or adj_y1 >= crop_height):
+            return None  # Detection is outside crop area
+        
+        return (adj_x1, adj_y1, adj_x2, adj_y2)
+
     def _annotate_frame(self, frame):
         """Annotate the frame with detection results and timestamp"""
         if self.latest_results:
@@ -2449,18 +2478,90 @@ class FireDetectionApp(QWidget):
                             label = names[cls_id].lower()
                             if ("fire" in label) or ("smoke" in label):
                                 xyxy = b.xyxy[0].cpu().numpy().astype(int)
-                                x1, y1, x2, y2 = xyxy
+                                conf = float(b.conf.item())
+                                
+                                # Adjust coordinates for cropped frame
+                                if self.crop_enabled:
+                                    # Get original frame dimensions from detection results
+                                    orig_shape = r.orig_shape if hasattr(r, 'orig_shape') else (720, 1280, 3)
+                                    crop_params = {
+                                        'x': self.crop_x,
+                                        'y': self.crop_y,
+                                        'width': self.crop_width,
+                                        'height': self.crop_height
+                                    }
+                                    adjusted_xyxy = self._adjust_detection_coordinates(
+                                        xyxy, orig_shape, frame.shape, crop_params
+                                    )
+                                    if adjusted_xyxy is None:
+                                        continue  # Skip detections outside crop area
+                                    x1, y1, x2, y2 = adjusted_xyxy
+                                else:
+                                    x1, y1, x2, y2 = xyxy
+                                
+                                # Choose color based on label
                                 color = (0, 0, 255) if "fire" in label else (0, 165, 255)
+                                
+                                # Draw bounding box
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                                cv2.putText(frame, label, (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                                
+                                # Draw label with confidence
+                                label_text = f"{label} {conf:.2f}"
+                                cv2.putText(frame, label_text, (x1, max(0, y1 - 5)), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 except Exception:
                     # Fallback silently to full plot if anything goes wrong
                     # Keep the cropped frame instead of replacing with original plot
                     pass
             else:
-                # Non-fast annotation: Keep the cropped frame
-                # The plot() method returns the original frame, so we can't use it
-                pass
+                # Non-fast annotation: Draw all detections with confidence
+                try:
+                    r = self.latest_results[0]
+                    names = r.names
+                    if r.boxes is not None:
+                        for b in r.boxes:
+                            cls_id = int(b.cls.item())
+                            label = names[cls_id].lower()
+                            xyxy = b.xyxy[0].cpu().numpy().astype(int)
+                            conf = float(b.conf.item())
+                            
+                            # Adjust coordinates for cropped frame
+                            if self.crop_enabled:
+                                # Get original frame dimensions from detection results
+                                orig_shape = r.orig_shape if hasattr(r, 'orig_shape') else (720, 1280, 3)
+                                crop_params = {
+                                    'x': self.crop_x,
+                                    'y': self.crop_y,
+                                    'width': self.crop_width,
+                                    'height': self.crop_height
+                                }
+                                adjusted_xyxy = self._adjust_detection_coordinates(
+                                    xyxy, orig_shape, frame.shape, crop_params
+                                )
+                                if adjusted_xyxy is None:
+                                    continue  # Skip detections outside crop area
+                                x1, y1, x2, y2 = adjusted_xyxy
+                            else:
+                                x1, y1, x2, y2 = xyxy
+                            
+                            # Choose color based on label
+                            if "fire" in label:
+                                color = (0, 0, 255)  # Red for fire
+                            elif "smoke" in label:
+                                color = (0, 165, 255)  # Orange for smoke
+                            else:
+                                color = (0, 255, 0)  # Green for other objects
+                            
+                            # Draw bounding box
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                            
+                            # Draw label with confidence
+                            label_text = f"{label} {conf:.2f}"
+                            cv2.putText(frame, label_text, (x1, max(0, y1 - 5)), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                except Exception:
+                    # Keep the cropped frame instead of replacing with original plot
+                    pass
 
         if self.alert_triggered:
             cv2.putText(frame, "FIRE/SMOKE DETECTED", (10, 40),
