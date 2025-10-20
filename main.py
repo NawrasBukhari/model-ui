@@ -1052,7 +1052,7 @@ class FireDetectionApp(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YOLO Fire/Smoke Detection - Multi-Source (1080p)")
+        self.setWindowTitle("SkyVision EP")
         self.resize(1280, 720)
 
         # Set application-wide dark theme
