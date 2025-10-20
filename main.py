@@ -5,14 +5,14 @@ import sys
 import threading
 import time
 import urllib.request
+import warnings
 from datetime import datetime
 from enum import Enum, auto
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 
 import cv2
 import numpy as np
 import torch
-import warnings
 
 # Suppress OpenCV warnings globally
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -77,14 +77,14 @@ class InteractiveVideoLabel(QLabel):
         self.setStyleSheet("border: 1px solid gray; background-color: black;")
         self._pixmap = None
         self._is_fullscreen = False
-        
+
         # Interactive crop variables
         self.crop_mode = False
         self.crop_start = None
         self.crop_end = None
         self.crop_rect = None
         self.drawing = False
-        
+
         # Enable mouse tracking
         self.setMouseTracking(True)
 
@@ -149,21 +149,22 @@ class InteractiveVideoLabel(QLabel):
             # Draw a test pattern when no pixmap is available
             painter = QPainter(self)
             painter.fillRect(self.rect(), QColor(0, 0, 0))  # Black background
-            
+
             # Draw a test pattern to verify the widget is working
             if getattr(self, '_is_fullscreen', False):
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "FULLSCREEN MODE\nWaiting for video...")
             else:
                 painter.setPen(QColor(128, 128, 128))
-                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Video feed will appear here\n(Maintains 16:9 aspect ratio)")
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                                 "Video feed will appear here\n(Maintains 16:9 aspect ratio)")
             return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         widget_rect = self.rect()
-        
+
         # In fullscreen mode, fill the entire area
         if getattr(self, '_is_fullscreen', False):
             # Scale pixmap to fill the entire widget area
@@ -172,11 +173,11 @@ class InteractiveVideoLabel(QLabel):
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation
             )
-            
+
             # Center the scaled pixmap
             x = (widget_rect.width() - scaled_pixmap.width()) // 2
             y = (widget_rect.height() - scaled_pixmap.height()) // 2
-            
+
             painter.drawPixmap(x, y, scaled_pixmap)
         else:
             # Normal mode: maintain 16:9 aspect ratio
@@ -215,12 +216,12 @@ class InteractiveVideoLabel(QLabel):
         if self.crop_mode and self.drawing and self.crop_start and self.crop_end:
             painter.setPen(QPen(QColor(255, 255, 0), 2))  # Yellow border
             painter.setBrush(QBrush(QColor(255, 255, 0, 30)))  # Semi-transparent yellow fill
-            
+
             x1 = min(self.crop_start.x(), self.crop_end.x())
             y1 = min(self.crop_start.y(), self.crop_end.y())
             x2 = max(self.crop_start.x(), self.crop_end.x())
             y2 = max(self.crop_start.y(), self.crop_end.y())
-            
+
             painter.drawRect(x1, y1, x2 - x1, y2 - y1)
 
     def setFullscreenMode(self, is_fullscreen):
@@ -249,21 +250,22 @@ class AspectRatioLabel(QLabel):
             # Draw a test pattern when no pixmap is available
             painter = QPainter(self)
             painter.fillRect(self.rect(), QColor(0, 0, 0))  # Black background
-            
+
             # Draw a test pattern to verify the widget is working
             if getattr(self, '_is_fullscreen', False):
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "FULLSCREEN MODE\nWaiting for video...")
             else:
                 painter.setPen(QColor(128, 128, 128))
-                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Video feed will appear here\n(Maintains 16:9 aspect ratio)")
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                                 "Video feed will appear here\n(Maintains 16:9 aspect ratio)")
             return
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         widget_rect = self.rect()
-        
+
         # In fullscreen mode, fill the entire area
         if getattr(self, '_is_fullscreen', False):
             # Scale pixmap to fill the entire widget area
@@ -272,11 +274,11 @@ class AspectRatioLabel(QLabel):
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation
             )
-            
+
             # Center the scaled pixmap
             x = (widget_rect.width() - scaled_pixmap.width()) // 2
             y = (widget_rect.height() - scaled_pixmap.height()) // 2
-            
+
             painter.drawPixmap(x, y, scaled_pixmap)
         else:
             # Normal mode: maintain 16:9 aspect ratio
@@ -609,7 +611,8 @@ class VideoHandler:
         self.actual_fourcc = ""
         self.actual_backend = ""
 
-    def _get_preferred_backend(self) -> int:
+    @staticmethod
+    def _get_preferred_backend() -> int:
         """Get the preferred OpenCV backend for the current OS"""
         system = platform.system().lower()
 
@@ -626,7 +629,8 @@ class VideoHandler:
             # Generic fallback
             return cv2.CAP_ANY
 
-    def _get_backend_name(self, backend: int) -> str:
+    @staticmethod
+    def _get_backend_name(backend: int) -> str:
         """Get human-readable backend name"""
         backend_names = {
             cv2.CAP_DSHOW: "DirectShow",
@@ -639,13 +643,13 @@ class VideoHandler:
 
     def _try_capture_modes(self, source: int) -> Optional[cv2.VideoCapture]:
         """Try different capture modes to achieve 1080p or best 16:9 resolution"""
-        
+
         # Suppress OpenCV warnings
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return self._try_capture_modes_impl(source)
-    
+
     def _try_capture_modes_impl(self, source: int) -> Optional[cv2.VideoCapture]:
         """Implementation of capture mode trying with warning suppression"""
         # Preferred 16:9 resolutions in order of preference
@@ -922,7 +926,8 @@ class BoundedFrameQueue:
 class CaptureThread(QThread):
     """Continuously reads frames to keep UI responsive and avoid lag."""
 
-    def __init__(self, video_handler: VideoHandler, frame_queue: Optional[BoundedFrameQueue] = None, fps_cap: Optional[int] = None):
+    def __init__(self, video_handler: VideoHandler, frame_queue: Optional[BoundedFrameQueue] = None,
+                 fps_cap: Optional[int] = None):
         super().__init__()
         self.video_handler = video_handler
         self.frame_queue = frame_queue
@@ -979,11 +984,13 @@ class ModelLoaderThread(QThread):
         except Exception as e:
             self.loaded.emit(None, False, str(e))
 
+
 class DetectionThread(QThread):
     """Thread for running YOLO detection"""
     detection_complete = pyqtSignal(object, bool)
 
-    def __init__(self, model: Any, video_handler: VideoHandler, conf_threshold: float, device: str, frame_queue: Optional['BoundedFrameQueue'] = None, imgsz: int = 640, half: bool = False):
+    def __init__(self, model: Any, video_handler: VideoHandler, conf_threshold: float, device: str,
+                 frame_queue: Optional['BoundedFrameQueue'] = None, imgsz: int = 640, half: bool = False):
         super().__init__()
         self.model = model
         self.video_handler = video_handler
@@ -1047,7 +1054,7 @@ class FireDetectionApp(QWidget):
         super().__init__()
         self.setWindowTitle("YOLO Fire/Smoke Detection - Multi-Source (1080p)")
         self.resize(1280, 720)
-        
+
         # Set application-wide dark theme
         self.setStyleSheet("""
             QWidget {
@@ -1133,7 +1140,7 @@ class FireDetectionApp(QWidget):
         self.screenstream_pin = None
         self.mirror_enabled = False  # No mirroring by default (better for HDMI capture)
         self.fps_cap = 30
-        
+
         # Image crop settings
         self.crop_enabled = False  # Default to disabled
         self.crop_x = 0
@@ -1202,7 +1209,7 @@ class FireDetectionApp(QWidget):
 
         # Main layout with sidebar
         main_layout = QHBoxLayout()
-        
+
         # Left side - video and controls
         left_layout = QVBoxLayout()
         left_layout.addWidget(self.device_info_label)
@@ -1210,27 +1217,27 @@ class FireDetectionApp(QWidget):
         left_layout.addWidget(self.video_label)
         left_layout.addLayout(self.control_buttons_layout)
         left_layout.addWidget(self.bottom_menu)
-        
+
         left_widget = QWidget()
         left_widget.setLayout(left_layout)
-        
+
         # Add sidebar and main content
         main_layout.addWidget(self.sidebar)
         main_layout.addWidget(left_widget, 1)  # Give main content more space
-        
+
         self.setLayout(main_layout)
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
-        
+
         # Status message timer for clearing temporary messages
         self.status_timer = QTimer()
         self.status_timer.setSingleShot(True)
         self.status_timer.timeout.connect(self._clear_status_message)
-        
+
         # Enable keyboard events for fullscreen control
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        
+
         # Handle resize events for proper fullscreen display
         self.resizeEvent = self._handle_resize_event
 
@@ -1336,10 +1343,10 @@ class FireDetectionApp(QWidget):
                 color: white;
             }
         """)
-        
+
         # Sidebar layout
         sidebar_layout = QVBoxLayout()
-        
+
         # Toggle button
         self.sidebar_toggle = QPushButton("⚙️ Settings")
         self.sidebar_toggle.setCheckable(True)
@@ -1363,35 +1370,35 @@ class FireDetectionApp(QWidget):
             }
         """)
         sidebar_layout.addWidget(self.sidebar_toggle)
-        
+
         # Settings container
         self.settings_container = QWidget()
         settings_layout = QVBoxLayout()
-        
+
         # Camera Source Section
         self.camera_source_group = QGroupBox("Camera Source")
         self._init_camera_source_ui()
         settings_layout.addWidget(self.camera_source_group)
-        
+
         # Image Crop Section
         self.crop_group = QGroupBox("Image Crop")
         self._init_crop_ui()
         settings_layout.addWidget(self.crop_group)
-        
+
         # Performance Section
         self.performance_group = QGroupBox("Performance")
         self._init_performance_controls()
         settings_layout.addWidget(self.performance_group)
-        
+
         # Camera Settings Section
         self.camera_settings_box = QGroupBox("Camera Settings")
         self._init_camera_settings_ui()
         settings_layout.addWidget(self.camera_settings_box)
-        
+
         self.settings_container.setLayout(settings_layout)
         sidebar_layout.addWidget(self.settings_container)
         sidebar_layout.addStretch()
-        
+
         self.sidebar.setLayout(sidebar_layout)
 
     def _toggle_sidebar(self):
@@ -1412,7 +1419,7 @@ class FireDetectionApp(QWidget):
     def _init_crop_ui(self):
         """Initialize image crop controls"""
         crop_layout = QVBoxLayout()
-        
+
         # Enable crop checkbox
         self.crop_enable_checkbox = QCheckBox("Enable Crop")
         self.crop_enable_checkbox.setChecked(self.crop_enabled)
@@ -1443,25 +1450,25 @@ class FireDetectionApp(QWidget):
         # Ensure the button is enabled and visible
         self.interactive_crop_button.setEnabled(True)
         self.interactive_crop_button.setVisible(True)
-        
+
         # Crop info display (read-only)
         crop_info_layout = QVBoxLayout()
         self.crop_info_label = QLabel("No crop selected")
         self.crop_info_label.setStyleSheet("color: #888; font-style: italic;")
         crop_info_layout.addWidget(self.crop_info_label)
-        
+
         crop_layout.addLayout(crop_info_layout)
-        
+
         # Reset crop button
         self.reset_crop_button = QPushButton("Reset Crop")
         self.reset_crop_button.clicked.connect(self._reset_crop)
         crop_layout.addWidget(self.reset_crop_button)
-        
+
         self.crop_group.setLayout(crop_layout)
 
     def _init_performance_controls(self):
         perf_layout = QVBoxLayout()
-        
+
         # Device selection
         device_layout = QHBoxLayout()
         device_layout.addWidget(QLabel("Device:"))
@@ -1530,7 +1537,8 @@ class FireDetectionApp(QWidget):
     def _update_crop_info_display(self):
         """Update the crop info display"""
         if self.crop_enabled:
-            self.crop_info_label.setText(f"Crop: {self.crop_width}% x {self.crop_height}% at ({self.crop_x}%, {self.crop_y}%)")
+            self.crop_info_label.setText(
+                f"Crop: {self.crop_width}% x {self.crop_height}% at ({self.crop_x}%, {self.crop_y}%)")
             self.crop_info_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
         else:
             self.crop_info_label.setText("No crop selected")
@@ -1541,10 +1549,10 @@ class FireDetectionApp(QWidget):
         if self.state != DetectionState.RUNNING:
             self._set_temporary_status("Status: Start detection first to use interactive crop")
             return
-        
+
         # Enable crop mode on video label
         self.video_label.setCropMode(True)
-        
+
         # Update button text and style
         self.interactive_crop_button.setText("❌ Cancel Crop")
         self.interactive_crop_button.setStyleSheet("""
@@ -1563,18 +1571,18 @@ class FireDetectionApp(QWidget):
                 background-color: #B71C1C;
             }
         """)
-        
+
         # Change click handler to cancel mode
         self.interactive_crop_button.clicked.disconnect()
         self.interactive_crop_button.clicked.connect(self._cancel_interactive_crop)
-        
+
         self._set_temporary_status("Status: Click and drag on video to select crop area")
 
     def _cancel_interactive_crop(self):
         """Cancel interactive crop selection mode"""
         # Disable crop mode on video label
         self.video_label.setCropMode(False)
-        
+
         # Reset button text and style
         self.interactive_crop_button.setText("🎯 Select Crop Area")
         self.interactive_crop_button.setStyleSheet("""
@@ -1593,11 +1601,11 @@ class FireDetectionApp(QWidget):
                 background-color: #E65100;
             }
         """)
-        
+
         # Change click handler back to start mode
         self.interactive_crop_button.clicked.disconnect()
         self.interactive_crop_button.clicked.connect(self._start_interactive_crop)
-        
+
         self._set_temporary_status("Status: Interactive crop cancelled")
 
     def _reset_crop(self):
@@ -1654,10 +1662,6 @@ class FireDetectionApp(QWidget):
         if cropped.size == 0:
             return frame
 
-        # Add crop indicator
-        cv2.putText(cropped, "CROPPED", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-
         return cropped
 
     def _on_device_changed(self, text: str):
@@ -1665,7 +1669,7 @@ class FireDetectionApp(QWidget):
         self.device = text
         self.device_info_label.setText(f"Using device: {self.device}")
         self._save_settings()
-        
+
         # If detection is running, restart with new device
         if self.state == DetectionState.RUNNING:
             self.status_label.setText("Status: Restarting detection with new device...")
@@ -1680,7 +1684,7 @@ class FireDetectionApp(QWidget):
     def _on_imgsz_changed(self, value: int):
         self.imgsz = value
         self._save_settings()
-        
+
         # Update detection thread if running
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.imgsz = value
@@ -1689,7 +1693,7 @@ class FireDetectionApp(QWidget):
     def _on_fps_changed(self, value: int):
         self.fps_cap = value
         self._save_settings()
-        
+
         # Update timer if detection is running
         if self.state == DetectionState.RUNNING and self.timer.isActive():
             self.timer.stop()
@@ -1699,7 +1703,7 @@ class FireDetectionApp(QWidget):
     def _on_half_changed(self, state):
         self.use_half = self.half_checkbox.isChecked()
         self._save_settings()
-        
+
         # Update detection thread if running
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.half = self.use_half
@@ -1740,7 +1744,7 @@ class FireDetectionApp(QWidget):
                 self.conf_threshold = float(conf)
             except Exception:
                 pass
-        
+
         # Load crop settings - FORCE DISABLED by default
         # Don't load crop_enabled from settings - always start disabled
         self.crop_enabled = False
@@ -1778,7 +1782,6 @@ class FireDetectionApp(QWidget):
         self.camera_selector = QComboBox()
         self._populate_camera_list()
         layout.addRow("Local Camera:", self.camera_selector)
-
 
         # ScreenStream Settings
         self.screenstream_url_input = QLineEdit()
@@ -1847,7 +1850,7 @@ class FireDetectionApp(QWidget):
             self._enter_fullscreen()
         else:
             self._exit_fullscreen()
-    
+
     def _enter_fullscreen(self):
         """Enter fullscreen mode"""
         # Hide sidebar and all controls for true fullscreen
@@ -1862,31 +1865,31 @@ class FireDetectionApp(QWidget):
         # Force layout update and ensure video label fills the screen
         self.layout().setContentsMargins(0, 0, 0, 0)
         self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        
+
         # Ensure video label is visible and properly sized
         self.video_label.show()
         self.video_label.setMinimumSize(100, 100)  # Ensure minimum size
-        
+
         # Set fullscreen mode for video label
         self.video_label.setFullscreenMode(True)
-        
+
         # Force a layout update
         self.layout().update()
         self.video_label.update()
-        
+
         # Use QTimer to delay resize to ensure fullscreen is fully active
         QTimer.singleShot(100, self._resize_video_for_fullscreen)
-        
+
         # Add status message
         self._set_temporary_status("Status: Fullscreen mode - Press ESC to exit")
-    
+
     def _resize_video_for_fullscreen(self):
         """Resize video label for fullscreen after a short delay"""
         if self.full_width_checkbox.isChecked():
             self.video_label.resize(self.size())
             print(f"Delayed resize - Window: {self.size()}, Video label: {self.video_label.size()}")
             self.video_label.update()
-    
+
     def _exit_fullscreen(self):
         """Exit fullscreen mode"""
         # Show all widgets when exiting fullscreen
@@ -1901,13 +1904,13 @@ class FireDetectionApp(QWidget):
         # Restore normal layout margins
         self.layout().setContentsMargins(9, 9, 9, 9)
         self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        
+
         # Set windowed mode for video label
         self.video_label.setFullscreenMode(False)
-        
+
         # Add status message
         self._set_temporary_status("Status: Exited fullscreen mode")
-    
+
     def on_crop_selected(self, crop_rect):
         """Handle crop selection from interactive video label"""
         if crop_rect:
@@ -2005,11 +2008,11 @@ class FireDetectionApp(QWidget):
                 self._exit_fullscreen()
         else:
             super().keyPressEvent(event)
-    
+
     def _handle_resize_event(self, event):
         """Handle window resize events for proper fullscreen display"""
         super().resizeEvent(event)
-        
+
         # If in fullscreen, ensure video label fills the entire window
         if self.full_width_checkbox.isChecked():
             self.video_label.resize(self.size())
@@ -2042,12 +2045,12 @@ class FireDetectionApp(QWidget):
     def _populate_camera_list(self):
         """Populate the local camera selector with available cameras"""
         self.camera_selector.clear()
-        
+
         # Suppress OpenCV warnings temporarily
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            
+
             for i in range(5):
                 try:
                     cap = cv2.VideoCapture(i)
@@ -2214,7 +2217,7 @@ class FireDetectionApp(QWidget):
         self.conf_threshold = self.conf_threshold_slider.value() / 100.0
         self.conf_threshold_label.setText(f"{self.conf_threshold_slider.value()}%")
         self._save_settings()
-        
+
         # Update detection thread if running
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.conf_threshold = self.conf_threshold
@@ -2328,7 +2331,8 @@ class FireDetectionApp(QWidget):
 
         device = self.device.split()[0].lower()
         self.detection_thread = DetectionThread(
-            self.model, self.video_handler, self.conf_threshold, device, frame_queue=self.frame_queue, imgsz=self.imgsz, half=self.use_half
+            self.model, self.video_handler, self.conf_threshold, device, frame_queue=self.frame_queue, imgsz=self.imgsz,
+            half=self.use_half
         )
         self.detection_thread.detection_complete.connect(self._on_detection_complete)
         self.detection_thread.start()
@@ -2336,7 +2340,7 @@ class FireDetectionApp(QWidget):
         self.timer.start(int(1000 / max(1, self.fps_cap)))
         self.state = DetectionState.RUNNING
         self.status_label.setText(f"✅ Detection started on {source_desc}")
-        
+
         self.update_ui_state()
 
     def stop_detection(self):
@@ -2413,11 +2417,6 @@ class FireDetectionApp(QWidget):
             # Debug: show why mirroring isn't working
             cv2.putText(annotated_frame, f"MIRROR DISABLED ({self.camera_source.name})", (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        
-        # Debug: Always show current state
-        debug_text = f"DEBUG: Source={self.camera_source.name}, Mirror={self.mirror_enabled}, Local={self.camera_source == CameraSource.LOCAL}"
-        cv2.putText(annotated_frame, debug_text, (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
         # Add camera source and mirror status indicator
         status_text = f"Source: {self.camera_source.name}"
@@ -2425,7 +2424,7 @@ class FireDetectionApp(QWidget):
             status_text += " | Mirror: ON"
         else:
             status_text += " | Mirror: OFF"
-        
+
         cv2.putText(annotated_frame, status_text, (10, annotated_frame.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -2439,30 +2438,30 @@ class FireDetectionApp(QWidget):
         """Adjust detection coordinates from original frame to cropped frame"""
         if not self.crop_enabled:
             return xyxy
-        
+
         x1, y1, x2, y2 = xyxy
         orig_height, orig_width = original_frame_shape[:2]
         crop_height, crop_width = cropped_frame_shape[:2]
-        
+
         # Convert crop percentages to pixel coordinates on original frame
         crop_x1 = int((crop_params['x'] / 100.0) * orig_width)
         crop_y1 = int((crop_params['y'] / 100.0) * orig_height)
         crop_x2 = int(((crop_params['x'] + crop_params['width']) / 100.0) * orig_width)
         crop_y2 = int(((crop_params['y'] + crop_params['height']) / 100.0) * orig_height)
-        
+
         # Adjust detection coordinates relative to crop area
         adj_x1 = x1 - crop_x1
         adj_y1 = y1 - crop_y1
         adj_x2 = x2 - crop_x1
         adj_y2 = y2 - crop_y1
-        
+
         # Check if detection is within crop bounds
-        if (adj_x1 < 0 or adj_y1 < 0 or 
-            adj_x2 > crop_width or adj_y2 > crop_height or
-            adj_x1 >= crop_width or adj_y1 >= crop_height):
+        if (adj_x1 < 0 or adj_y1 < 0 or
+                adj_x2 > crop_width or adj_y2 > crop_height or
+                adj_x1 >= crop_width or adj_y1 >= crop_height):
             return None  # Detection is outside crop area
-        
-        return (adj_x1, adj_y1, adj_x2, adj_y2)
+
+        return adj_x1, adj_y1, adj_x2, adj_y2
 
     def _annotate_frame(self, frame):
         """Annotate the frame with detection results and timestamp"""
@@ -2479,7 +2478,7 @@ class FireDetectionApp(QWidget):
                             if ("fire" in label) or ("smoke" in label):
                                 xyxy = b.xyxy[0].cpu().numpy().astype(int)
                                 conf = float(b.conf.item())
-                                
+
                                 # Adjust coordinates for cropped frame
                                 if self.crop_enabled:
                                     # Get original frame dimensions from detection results
@@ -2498,17 +2497,17 @@ class FireDetectionApp(QWidget):
                                     x1, y1, x2, y2 = adjusted_xyxy
                                 else:
                                     x1, y1, x2, y2 = xyxy
-                                
+
                                 # Choose color based on label
                                 color = (0, 0, 255) if "fire" in label else (0, 165, 255)
-                                
+
                                 # Draw bounding box
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                                
+
                                 # Draw label with confidence
                                 label_text = f"{label} {conf:.2f}"
-                                cv2.putText(frame, label_text, (x1, max(0, y1 - 5)), 
-                                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                                cv2.putText(frame, label_text, (x1, max(0, y1 - 5)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 except Exception:
                     # Fallback silently to full plot if anything goes wrong
                     # Keep the cropped frame instead of replacing with original plot
@@ -2524,7 +2523,7 @@ class FireDetectionApp(QWidget):
                             label = names[cls_id].lower()
                             xyxy = b.xyxy[0].cpu().numpy().astype(int)
                             conf = float(b.conf.item())
-                            
+
                             # Adjust coordinates for cropped frame
                             if self.crop_enabled:
                                 # Get original frame dimensions from detection results
@@ -2543,7 +2542,7 @@ class FireDetectionApp(QWidget):
                                 x1, y1, x2, y2 = adjusted_xyxy
                             else:
                                 x1, y1, x2, y2 = xyxy
-                            
+
                             # Choose color based on label
                             if "fire" in label:
                                 color = (0, 0, 255)  # Red for fire
@@ -2551,14 +2550,14 @@ class FireDetectionApp(QWidget):
                                 color = (0, 165, 255)  # Orange for smoke
                             else:
                                 color = (0, 255, 0)  # Green for other objects
-                            
+
                             # Draw bounding box
                             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                            
+
                             # Draw label with confidence
                             label_text = f"{label} {conf:.2f}"
-                            cv2.putText(frame, label_text, (x1, max(0, y1 - 5)), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.putText(frame, label_text, (x1, max(0, y1 - 5)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 except Exception:
                     # Keep the cropped frame instead of replacing with original plot
                     pass
@@ -2590,14 +2589,14 @@ class FireDetectionApp(QWidget):
 
         # Convert frame to QImage
         bytes_per_line = channels * width
-        
+
         # Convert memoryview to bytes if necessary
         frame_data = frame.data
         if hasattr(frame_data, 'tobytes'):
             frame_data = frame_data.tobytes()
         elif not isinstance(frame_data, bytes):
             frame_data = bytes(frame_data)
-        
+
         # Create QImage with proper error handling
         try:
             img = QImage(frame_data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
